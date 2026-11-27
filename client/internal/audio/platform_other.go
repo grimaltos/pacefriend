@@ -36,7 +36,7 @@ func requiresStagedFile(_ clipFormat) bool {
 	return true
 }
 
-func playPlatformClip(clip cachedClip) error {
+func playPlatformClip(clip cachedClip, _ int) error {
 	detectOnce.Do(detectLinuxPlayer)
 	if linuxCmdPath == "" || clip.stagedPath == "" {
 		return nil

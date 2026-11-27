@@ -73,6 +73,51 @@ class User extends Authenticatable
         return $phonetic !== '' ? $phonetic : $this->effectiveCallsign();
     }
 
+    /**
+     * Normalized radio engineer voice, FX, and on-track callout preferences.
+     *
+     * @return array{
+     *   voice_id: string,
+     *   volume: int,
+     *   radio_beep: bool,
+     *   pit_wall_fx: bool,
+     *   finish_callout_mode: string,
+     *   min_clean_laps: int,
+     *   fuel_alerts: bool,
+     *   tyre_temp_alerts: bool
+     * }
+     */
+    public function radioSettings(): array
+    {
+        $prefs = $this->preferences ?? [];
+        $allowedVoices = array_keys(config('pacefriend.voice.edge.voices', [
+            'es-ES-AlvaroNeural' => 'Álvaro',
+            'es-ES-XimenaNeural' => 'Ximena',
+            'es-ES-ElviraNeural' => 'Elvira',
+        ]));
+
+        $voice = (string) ($prefs['radio_voice_id'] ?? config('pacefriend.voice.edge.default_voice', 'es-ES-AlvaroNeural'));
+        if (! in_array($voice, $allowedVoices, true)) {
+            $voice = 'es-ES-AlvaroNeural';
+        }
+
+        $finishMode = (string) ($prefs['finish_callout_mode'] ?? 'full');
+        if (! in_array($finishMode, ['full', 'improvements', 'off'], true)) {
+            $finishMode = 'full';
+        }
+
+        return [
+            'voice_id' => $voice,
+            'volume' => max(0, min(100, (int) ($prefs['radio_volume'] ?? 85))),
+            'radio_beep' => (bool) ($prefs['radio_beep'] ?? true),
+            'pit_wall_fx' => (bool) ($prefs['pit_wall_fx'] ?? true),
+            'finish_callout_mode' => $finishMode,
+            'min_clean_laps' => max(2, min(5, (int) ($prefs['min_clean_laps'] ?? config('pacefriend.min_chronic_occurrences', 3)))),
+            'fuel_alerts' => (bool) ($prefs['fuel_alerts'] ?? true),
+            'tyre_temp_alerts' => (bool) ($prefs['tyre_temp_alerts'] ?? true),
+        ];
+    }
+
     public function referenceLaps(): HasMany
     {
         return $this->hasMany(ReferenceLap::class);

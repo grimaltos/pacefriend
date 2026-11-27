@@ -114,6 +114,8 @@ class IbtFileParserService
                     'max_pct' => 0.0,
                     'start_time' => null,
                     'end_time' => null,
+                    'start_fuel' => null,
+                    'end_fuel' => null,
                     'samples' => [],
                 ];
             }
@@ -122,6 +124,14 @@ class IbtFileParserService
             $sessionTime = isset($vars['SessionTime'])
                 ? (float) $this->readScalar($bytes, $rowOffset, $vars['SessionTime'])
                 : ($r / $tickRate);
+
+            if (isset($vars['FuelLevel'])) {
+                $fuelVal = (float) $this->readScalar($bytes, $rowOffset, $vars['FuelLevel']);
+                if ($laps[$lapNum]['start_fuel'] === null) {
+                    $laps[$lapNum]['start_fuel'] = $fuelVal;
+                }
+                $laps[$lapNum]['end_fuel'] = $fuelVal;
+            }
 
             if ($laps[$lapNum]['start_time'] === null) {
                 $laps[$lapNum]['start_time'] = $sessionTime;
@@ -186,6 +196,11 @@ class IbtFileParserService
             throw new InvalidArgumentException('No se encontró ninguna vuelta rápida limpia y completa dentro del archivo .ibt.');
         }
 
+        $fuelLevelL = $bestLap['start_fuel'] !== null ? round((float) $bestLap['start_fuel'], 2) : null;
+        $fuelUsedL = ($bestLap['start_fuel'] !== null && $bestLap['end_fuel'] !== null && $bestLap['start_fuel'] > $bestLap['end_fuel'])
+            ? round((float) ($bestLap['start_fuel'] - $bestLap['end_fuel']), 3)
+            : null;
+
         return [
             'track_slug' => $meta['track_slug'],
             'track_name' => $meta['track_name'],
@@ -195,6 +210,8 @@ class IbtFileParserService
             'track_temp_c' => $tempSamples > 0 ? round($trackTempSum / $tempSamples, 1) : 26.0,
             'air_temp_c' => $tempSamples > 0 ? round($airTempSum / $tempSamples, 1) : 20.0,
             'is_wet' => $wetDetected,
+            'fuel_level_l' => $fuelLevelL,
+            'fuel_used_l' => $fuelUsedL,
             'source' => 'ibt_upload',
             'samples' => $bestLap['samples'],
         ];
@@ -227,6 +244,8 @@ class IbtFileParserService
             'track_temp_c' => (float) ($decoded['track_temp_c'] ?? 26.0),
             'air_temp_c' => (float) ($decoded['air_temp_c'] ?? 20.0),
             'is_wet' => (bool) ($decoded['is_wet'] ?? false),
+            'fuel_level_l' => isset($decoded['fuel_level_l']) ? (float) $decoded['fuel_level_l'] : null,
+            'fuel_used_l' => isset($decoded['fuel_used_l']) ? (float) $decoded['fuel_used_l'] : null,
             'source' => 'json_upload',
             'samples' => $samples,
         ];

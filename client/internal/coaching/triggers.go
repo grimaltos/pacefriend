@@ -40,6 +40,22 @@ type Plan struct {
 	Triggers      []Trigger `json:"triggers"`
 }
 
+// Callout represents an immediate non-spatial engineer message (out-lap briefing,
+// start/finish lap time & positive reinforcement, fuel alert, or pit tyre debrief).
+type Callout struct {
+	ID          string `json:"id"`
+	Text        string `json:"text"`
+	AudioURL    string `json:"audio_url,omitempty"`
+	AudioSHA256 string `json:"audio_sha256,omitempty"`
+}
+
+// ImmediateSpeaker is optionally implemented by Speaker engines capable of dynamic
+// volume control and immediate non-spatial radio callouts.
+type ImmediateSpeaker interface {
+	PlayCallouts(ctx context.Context, callouts []Callout) error
+	SetVolume(pct int)
+}
+
 // Speaker abstracts non-blocking radio callout playback (console logger in Phase 1,
 // in-memory preloaded AI voice clips in Phase 4).
 type Speaker interface {

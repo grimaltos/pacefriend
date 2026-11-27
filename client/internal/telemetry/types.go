@@ -35,6 +35,12 @@ type RawFrame struct {
 	TrackTempC        float32
 	AirTempC          float32
 	IsWet             bool
+	IsOnTrack         bool
+	FuelLevelL        float32
+	TyreLFTempC       float32
+	TyreRFTempC       float32
+	TyreLRTempC       float32
+	TyreRRTempC       float32
 }
 
 // SessionMetadata identifies the circuit, car, and iRacing session extracted
@@ -65,6 +71,8 @@ type CompletedLap struct {
 	TrackTempC    float32  `json:"track_temp_c"`
 	AirTempC      float32  `json:"air_temp_c"`
 	IsWet         bool     `json:"is_wet"`
+	FuelLevelL    float32  `json:"fuel_level_l,omitempty"`
+	FuelUsedL     float32  `json:"fuel_used_l,omitempty"`
 	SampleRateHz  int      `json:"sample_rate_hz"`
 	Samples       []Sample `json:"samples"`
 }

@@ -22,11 +22,11 @@ var (
 
 func requiresStagedFile(format clipFormat) bool {
 	// WAV plays directly out of Go's RAM slice via PlaySoundW(SND_MEMORY).
-	// MP3 (ElevenLabs) uses Win32 MCI over a pre-staged file written once during Preload.
+	// MP3 uses Win32 MCI over a pre-staged file written once during Preload.
 	return format == formatMP3
 }
 
-func playPlatformClip(clip cachedClip) error {
+func playPlatformClip(clip cachedClip, volumePct int) error {
 	if clip.format == formatWAV && len(clip.data) > 0 {
 		r1, _, err := procPlaySoundW.Call(
 			uintptr(unsafe.Pointer(&clip.data[0])),
@@ -45,6 +45,13 @@ func playPlatformClip(clip cachedClip) error {
 			return err
 		}
 		defer func() { _ = mciCommand(`close pacefriend_clip`) }()
+		mciVol := volumePct * 10 // MCI volume range is 0..1000
+		if mciVol < 0 {
+			mciVol = 0
+		} else if mciVol > 1000 {
+			mciVol = 1000
+		}
+		_ = mciCommand(fmt.Sprintf(`setaudio pacefriend_clip volume to %d`, mciVol))
 		return mciCommand(`play pacefriend_clip wait`)
 	}
 

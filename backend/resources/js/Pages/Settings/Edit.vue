@@ -1,10 +1,11 @@
 <script setup>
 import { Head, router, useForm, usePage } from '@inertiajs/vue3';
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import AppLayout from '../../Layouts/AppLayout.vue';
 
 const props = defineProps({
     profile: Object,
+    voiceCatalog: Object,
     tokens: Array,
     apiBaseUrl: String,
     clientExeAvailable: Boolean,
@@ -19,6 +20,18 @@ const profileForm = useForm({
     callsign_phonetic: props.profile.callsign_phonetic || '',
 });
 
+const radioDefaults = props.profile.radio || {};
+const radioForm = useForm({
+    voice_id: radioDefaults.voice_id || 'es-ES-AlvaroNeural',
+    volume: radioDefaults.volume ?? 85,
+    radio_beep: radioDefaults.radio_beep ?? true,
+    pit_wall_fx: radioDefaults.pit_wall_fx ?? true,
+    finish_callout_mode: radioDefaults.finish_callout_mode || 'full',
+    min_clean_laps: radioDefaults.min_clean_laps || 3,
+    fuel_alerts: radioDefaults.fuel_alerts ?? true,
+    tyre_temp_alerts: radioDefaults.tyre_temp_alerts ?? true,
+});
+
 const g61Form = useForm({
     clear_token: false,
     autopilot_enabled: props.profile.autopilot_enabled ?? true,
@@ -31,8 +44,64 @@ const tokenForm = useForm({
     token_name: 'PC Simulador Windows',
 });
 
+const previewLoading = ref(false);
+const previewError = ref('');
+let activeAudio = null;
+
 function saveProfile() {
     profileForm.put('/settings/profile');
+}
+
+function saveRadio() {
+    radioForm.put('/settings/radio');
+}
+
+async function testRadioPreview() {
+    previewLoading.value = true;
+    previewError.value = '';
+    try {
+        const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        const xsrfCookie = document.cookie
+            .split('; ')
+            .find((row) => row.startsWith('XSRF-TOKEN='))
+            ?.split('=')[1];
+
+        const headers = {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+        };
+        if (csrf) {
+            headers['X-CSRF-TOKEN'] = csrf;
+        } else if (xsrfCookie) {
+            headers['X-XSRF-TOKEN'] = decodeURIComponent(xsrfCookie);
+        }
+
+        const resp = await fetch('/settings/radio/preview', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                voice_id: radioForm.voice_id,
+                volume: Number(radioForm.volume),
+                radio_beep: Boolean(radioForm.radio_beep),
+                pit_wall_fx: Boolean(radioForm.pit_wall_fx),
+            }),
+        });
+
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        if (activeAudio) {
+            activeAudio.pause();
+        }
+        activeAudio = new Audio(data.url);
+        activeAudio.volume = Math.max(0, Math.min(1, Number(radioForm.volume) / 100));
+        await activeAudio.play();
+    } catch (e) {
+        previewError.value = 'No se pudo reproducir la prueba de radio (' + e.message + ').';
+    } finally {
+        previewLoading.value = false;
+    }
 }
 
 function saveGarage61() {
@@ -75,11 +144,121 @@ function revoke(id) {
             <h1 class="text-2xl sm:text-3xl font-bold text-white">Ajustes de Piloto y Conexión Local</h1>
         </div>
 
+        <!-- Full-width Engineer Voice, FX & On-Track Callouts -->
+        <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6 mb-8">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5 pb-4 border-b border-zinc-800">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">Radio del Ingeniero, Voz Neural y Avisos en Pista</h2>
+                    <p class="text-xs text-zinc-400">
+                        Elige la voz de tu ingeniero, efectos de muro de boxes, volumen independiente y qué información te canta durante la sesión.
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    :disabled="previewLoading"
+                    @click="testRadioPreview"
+                    class="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-emerald-300 font-semibold text-xs transition cursor-pointer shrink-0"
+                >
+                    {{ previewLoading ? 'Sintetizando radio...' : '🔊 Escuchar prueba de radio' }}
+                </button>
+            </div>
+
+            <p v-if="previewError" class="mb-4 text-xs text-rose-400">{{ previewError }}</p>
+
+            <form @submit.prevent="saveRadio" class="space-y-6">
+                <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Voz del Ingeniero (Edge Neural)</label>
+                        <select v-model="radioForm.voice_id" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+                            <option v-for="(label, id) in voiceCatalog" :key="id" :value="id">
+                                {{ label }}
+                            </option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-1">
+                            <label class="text-xs font-medium text-zinc-300">Volumen de Radio</label>
+                            <span class="text-xs font-bold text-emerald-400">{{ radioForm.volume }}%</span>
+                        </div>
+                        <input
+                            v-model.number="radioForm.volume"
+                            type="range"
+                            min="0"
+                            max="100"
+                            step="5"
+                            class="w-full accent-emerald-500 cursor-pointer mt-2"
+                        />
+                        <p class="text-[11px] text-zinc-500 mt-1">Se aplica en vivo al cliente Windows sin tocar el volumen del motor de iRacing.</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Aviso al cruzar por meta</label>
+                        <select v-model="radioForm.finish_callout_mode" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+                            <option value="full">Completo (tiempos + refuerzo positivo)</option>
+                            <option value="improvements">Solo mejoras y refuerzo positivo</option>
+                            <option value="off">Desactivado (silencio en recta de meta)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Vueltas limpias antes de corregir curvas</label>
+                        <select v-model.number="radioForm.min_clean_laps" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+                            <option :value="2">2 vueltas limpias (Feedback rápido)</option>
+                            <option :value="3">3 vueltas limpias (Equilibrado · Recomendado)</option>
+                            <option :value="4">4 vueltas limpias</option>
+                            <option :value="5">5 vueltas limpias (Solo hábitos muy marcados)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-1">
+                    <label class="flex items-start gap-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5 cursor-pointer">
+                        <input v-model="radioForm.radio_beep" type="checkbox" class="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-emerald-500" />
+                        <div class="text-xs">
+                            <div class="font-semibold text-zinc-200">Bip de apertura/cierre (PTT)</div>
+                            <div class="text-zinc-500 mt-0.5">Doble tono corto antes de hablar y clic al soltar radio.</div>
+                        </div>
+                    </label>
+
+                    <label class="flex items-start gap-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5 cursor-pointer">
+                        <input v-model="radioForm.pit_wall_fx" type="checkbox" class="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-emerald-500" />
+                        <div class="text-xs">
+                            <div class="font-semibold text-zinc-200">Efecto radio muro de boxes</div>
+                            <div class="text-zinc-500 mt-0.5">Ecualización de casco y compresión para cortar sobre el motor.</div>
+                        </div>
+                    </label>
+
+                    <label class="flex items-start gap-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5 cursor-pointer">
+                        <input v-model="radioForm.fuel_alerts" type="checkbox" class="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-emerald-500" />
+                        <div class="text-xs">
+                            <div class="font-semibold text-zinc-200">Combustible vs Target y Reserva</div>
+                            <div class="text-zinc-500 mt-0.5">Compara peso/gasto frente a la referencia y avisa a 3 y 1 vueltas.</div>
+                        </div>
+                    </label>
+
+                    <label class="flex items-start gap-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5 cursor-pointer">
+                        <input v-model="radioForm.tyre_temp_alerts" type="checkbox" class="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-emerald-500" />
+                        <div class="text-xs">
+                            <div class="font-semibold text-zinc-200">Avisos de Neumáticos</div>
+                            <div class="text-zinc-500 mt-0.5">Precaución de goma fría en out-lap y lectura real al parar en boxes.</div>
+                        </div>
+                    </label>
+                </div>
+
+                <div>
+                    <button type="submit" :disabled="radioForm.processing" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition cursor-pointer">
+                        Guardar Configuración de Radio
+                    </button>
+                </div>
+            </form>
+        </div>
+
         <div class="grid lg:grid-cols-2 gap-8 mb-8">
             <!-- Driver Callsign & Voice Personalization -->
             <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6">
                 <h2 class="text-lg font-semibold text-white mb-1">Identidad en Radio (Callsign)</h2>
-                <p class="text-xs text-zinc-400 mb-5">Tu ingeniero se dirigirá a ti por este nombre tanto en los avisos pre-frenada como en el Informe PRO.</p>
+                <p class="text-xs text-zinc-400 mb-5">Tu ingeniero se dirigirá a ti por este nombre tanto en el saludo inicial como en las frenadas y el Informe PRO.</p>
 
                 <form @submit.prevent="saveProfile" class="space-y-4">
                     <div>
@@ -89,7 +268,7 @@ function revoke(id) {
 
                     <div>
                         <label class="block text-xs font-medium text-zinc-300 mb-1">¿Cómo te llama el Coach? (Callsign)</label>
-                        <input v-model="profileForm.driver_callsign" type="text" placeholder="Ej. Carlos" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500" />
+                        <input v-model="profileForm.driver_callsign" type="text" placeholder="Ej. Vicent" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500" />
                         <p class="text-[11px] text-zinc-500 mt-1">Ejemplo: <em>“{{ profileForm.driver_callsign || profile.effective_callsign }}, en La Source retrasa diez metros la frenada.”</em></p>
                     </div>
 
@@ -99,7 +278,7 @@ function revoke(id) {
                     </div>
 
                     <button type="submit" :disabled="profileForm.processing" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition cursor-pointer">
-                        Guardar Preferencias de Radio
+                        Guardar Identidad
                     </button>
                 </form>
             </div>
@@ -116,7 +295,6 @@ function revoke(id) {
                     Vincula tu cuenta de Garage 61 en un clic para sincronizar tus vueltas, tus análisis y las referencias de tu equipo.
                 </p>
 
-                <!-- 1-Click OAuth2 Button -->
                 <div class="mb-4">
                     <a
                         v-if="profile.garage61_oauth_available"

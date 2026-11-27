@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,7 +22,7 @@ import (
 )
 
 const (
-	MaxCachedClips = 32
+	MaxCachedClips = 48
 	maxAudioBytes  = 8 << 20 // 8 MB safety cap per voice clip
 )
 
@@ -42,15 +43,18 @@ type cachedClip struct {
 // Config configures the RAM-preloaded local voice playback engine.
 type Config struct {
 	Muted      bool
+	Volume     int // 0..100 (default 85 if <= 0 and not explicitly 0)
 	APIToken   string
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 }
 
-// Engine implements coaching.Speaker with background HTTP preloading into RAM,
-// SHA-256 integrity verification, and a non-blocking playback queue (0 allocs in 20 Hz loop).
+// Engine implements coaching.Speaker and coaching.ImmediateSpeaker with background HTTP
+// preloading into RAM, SHA-256 integrity verification, independent software volume scaling,
+// and a non-blocking playback queue (0 allocs in the 20 Hz telemetry loop).
 type Engine struct {
 	muted      atomic.Bool
+	volumePct  atomic.Int32
 	apiToken   string
 	httpClient *http.Client
 	logger     *slog.Logger
@@ -60,18 +64,27 @@ type Engine struct {
 	clips map[string]cachedClip
 	order []string
 
-	playCh chan coaching.Trigger
-	wg     sync.WaitGroup
+	playCh    chan coaching.Trigger
+	scaledBuf []byte // Owned exclusively by playbackLoop goroutine for zero-lock WAV volume scaling
+	wg        sync.WaitGroup
 }
 
 // NewEngine creates and starts the background audio worker goroutine.
 func NewEngine(cfg Config) *Engine {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
+		httpClient = &http.Client{Timeout: 12 * time.Second}
 	}
 	stageDir := filepath.Join(os.TempDir(), "pacefriend-audio")
 	_ = os.MkdirAll(stageDir, 0o700)
+
+	initialVol := cfg.Volume
+	if initialVol <= 0 {
+		initialVol = 85
+	}
+	if initialVol > 100 {
+		initialVol = 100
+	}
 
 	e := &Engine{
 		apiToken:   strings.TrimSpace(cfg.APIToken),
@@ -80,9 +93,10 @@ func NewEngine(cfg Config) *Engine {
 		stageDir:   stageDir,
 		clips:      make(map[string]cachedClip, MaxCachedClips),
 		order:      make([]string, 0, MaxCachedClips),
-		playCh:     make(chan coaching.Trigger, 2),
+		playCh:     make(chan coaching.Trigger, 6),
 	}
 	e.muted.Store(cfg.Muted)
+	e.volumePct.Store(int32(initialVol))
 
 	e.wg.Add(1)
 	go e.playbackLoop()
@@ -106,6 +120,21 @@ func (e *Engine) SetMuted(muted bool) {
 // IsMuted reports whether radio playback is currently silenced.
 func (e *Engine) IsMuted() bool {
 	return e.muted.Load()
+}
+
+// SetVolume atomically sets the independent PaceFriend radio volume percentage (0..100).
+func (e *Engine) SetVolume(pct int) {
+	if pct < 0 {
+		pct = 0
+	} else if pct > 100 {
+		pct = 100
+	}
+	e.volumePct.Store(int32(pct))
+}
+
+// Volume returns the current independent radio volume percentage (0..100).
+func (e *Engine) Volume() int {
+	return int(e.volumePct.Load())
 }
 
 // CachedCount returns the number of voice clips currently resident in RAM.
@@ -134,13 +163,38 @@ func (e *Engine) Preload(ctx context.Context, plan *coaching.Plan) error {
 	return firstErr
 }
 
-// Speak enqueues a spatial trigger for immediate playback without blocking
+// PlayCallouts preloads immediate non-spatial radio callouts (greeting, finish-line time,
+// fuel/tyre check) and queues them for immediate playback in order.
+func (e *Engine) PlayCallouts(ctx context.Context, callouts []coaching.Callout) error {
+	var firstErr error
+	for _, c := range callouts {
+		trg := coaching.Trigger{
+			ID:          c.ID,
+			Phase:       coaching.Phase("radio_callout"),
+			Text:        c.Text,
+			AudioURL:    c.AudioURL,
+			AudioSHA256: c.AudioSHA256,
+		}
+		if trg.AudioURL != "" {
+			if err := e.preloadSingle(ctx, trg); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		e.Speak(trg)
+	}
+	return firstErr
+}
+
+// Speak enqueues a spatial or immediate trigger for playback without blocking
 // or allocating on the heap inside the 20 Hz telemetry sampling loop.
 func (e *Engine) Speak(trg coaching.Trigger) {
 	select {
 	case e.playCh <- trg:
 	default:
-		// Another radio message is already playing and one is queued; skip overlap cleanly.
+		// Queue full; skip overlap cleanly rather than stalling telemetry.
 	}
 }
 
@@ -227,28 +281,73 @@ func (e *Engine) playbackLoop() {
 		clip, hasClip := e.clips[key]
 		e.mu.RUnlock()
 
+		vol := int(e.volumePct.Load())
+
 		if e.logger != nil {
 			e.logger.Info("RADIO ENGINEER",
 				slog.Int("turn", trg.Turn),
 				slog.String("phase", string(trg.Phase)),
 				slog.Float64("pct", float64(trg.TriggerPct)),
 				slog.Bool("ram_audio", hasClip),
+				slog.Int("volume", vol),
 				slog.String("message", trg.Text),
 			)
 		}
 
-		if e.muted.Load() {
+		if e.muted.Load() || vol <= 0 {
 			continue
 		}
 
 		if hasClip {
-			if err := playPlatformClip(clip); err != nil && e.logger != nil {
-				e.logger.Debug("audio playback warning", slog.Any("err", err))
+			playClip := clip
+			if clip.format == formatWAV && vol < 99 {
+				playClip.data = scaleWavPCM16(clip.data, vol, &e.scaledBuf)
+			}
+			if err := playPlatformClip(playClip, vol); err != nil && e.logger != nil {
+				e.logger.Warn("audio playback warning", slog.Any("err", err))
 			}
 		} else {
 			_ = speakPlatformFallback(trg.Text)
 		}
 	}
+}
+
+// scaleWavPCM16 scales 16-bit signed LE PCM samples in a standard WAV buffer by volPct/100
+// into a reusable buffer without touching iRacing's global Windows volume mixer.
+func scaleWavPCM16(wav []byte, volPct int, dst *[]byte) []byte {
+	if len(wav) <= 44 || volPct >= 100 {
+		return wav
+	}
+	if cap(*dst) < len(wav) {
+		*dst = make([]byte, len(wav))
+	} else {
+		*dst = (*dst)[:len(wav)]
+	}
+	out := *dst
+	copy(out[:44], wav[:44])
+
+	// Locate "data" chunk offset safely (standard is byte 36 -> samples at 44)
+	dataStart := 44
+	for pos := 12; pos+8 <= len(wav) && pos < 128; {
+		chunkID := wav[pos : pos+4]
+		chunkSize := int(binary.LittleEndian.Uint32(wav[pos+4 : pos+8]))
+		if bytes.Equal(chunkID, []byte("data")) {
+			dataStart = pos + 8
+			copy(out[:dataStart], wav[:dataStart])
+			break
+		}
+		if chunkSize < 0 {
+			break
+		}
+		pos += 8 + chunkSize
+	}
+
+	for i := dataStart; i+1 < len(wav); i += 2 {
+		s := int32(int16(binary.LittleEndian.Uint16(wav[i : i+2])))
+		scaled := (s * int32(volPct)) / 100
+		binary.LittleEndian.PutUint16(out[i:i+2], uint16(int16(scaled)))
+	}
+	return out
 }
 
 func (e *Engine) stageClipIfNeeded(key string, format clipFormat, data []byte) (string, error) {

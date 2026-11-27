@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/pacefriend/client/internal/buffer"
@@ -40,12 +41,22 @@ type Runner struct {
 	lapStartTimeSec   float64
 	lapStartWall      time.Time
 	lapStartIncidents int32
+	lapStartFuelL     float32
 	prevIncidents     int32
 	prevPct           float32
 	completedLaps     int
+
+	// Engineer radio briefing & pit tyre pyrometer state
+	briefingSent          bool
+	briefedTrackTempC     float32
+	briefedIsWet          bool
+	droveOnTrackThisStint bool
+	pitDebriefSent        bool
+	pitStoppedTicks       int
+	stintLaps             int
 }
 
-// NewRunner wires all Phase 1 subsystems into a cohesive real-time loop.
+// NewRunner wires all subsystems into a cohesive real-time loop.
 func NewRunner(
 	cfg Config,
 	source telemetry.Source,
@@ -125,6 +136,8 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 	currPct := frame.Sample.LapDistPct
 	onPitRoad := frame.Sample.Flags&telemetry.FlagOnPitRoad != 0
 
+	r.evaluateBriefingAndPitTyres(frame, onPitRoad)
+
 	if !r.initialized {
 		r.initialized = true
 		r.activeLap = currLap
@@ -133,6 +146,7 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 		r.lapStartTimeSec = frame.SessionTimeSec
 		r.lapStartWall = now
 		r.lapStartIncidents = frame.IncidentCount
+		r.lapStartFuelL = frame.FuelLevelL
 		r.prevIncidents = frame.IncidentCount
 		r.prevPct = currPct
 	} else if currLap != r.activeLap {
@@ -141,6 +155,7 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 		if crossedFinishLine && r.fullFlyingLap && r.ring.Len() >= r.cfg.MinSamplesPerLap {
 			r.emitCompletedLap(now, frame)
 			r.completedLaps++
+			r.stintLaps++
 			if r.cfg.MaxLaps > 0 && r.completedLaps >= r.cfg.MaxLaps {
 				return true
 			}
@@ -158,6 +173,7 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 		r.lapStartTimeSec = frame.SessionTimeSec
 		r.lapStartWall = now
 		r.lapStartIncidents = frame.IncidentCount
+		r.lapStartFuelL = frame.FuelLevelL
 	}
 
 	if frame.IncidentCount > r.prevIncidents {
@@ -183,6 +199,86 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 	return false
 }
 
+func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoad bool) {
+	if r.uploader == nil {
+		return
+	}
+
+	// 1. Out-lap / Session Start Greeting & Weather-Shift Alerts
+	if frame.IsOnTrack && !onPitRoad {
+		if !r.briefingSent {
+			meta := r.source.SessionMetadata()
+			if meta.TrackSlug != "" && meta.CarName != "" {
+				r.briefingSent = true
+				r.briefedTrackTempC = frame.TrackTempC
+				r.briefedIsWet = frame.IsWet
+				r.uploader.EnqueueBriefing(transport.BriefingRequest{
+					TrackSlug:     meta.TrackSlug,
+					TrackName:     meta.TrackName,
+					TrackLengthKm: meta.TrackLengthKm,
+					CarName:       meta.CarName,
+					SessionID:     meta.SessionID,
+					SubSessionID:  meta.SubSessionID,
+					TrackTempC:    frame.TrackTempC,
+					AirTempC:      frame.AirTempC,
+					IsWet:         frame.IsWet,
+					FuelLevelL:    frame.FuelLevelL,
+					Reason:        "session_start",
+				})
+			}
+		} else if frame.TrackTempC > 0 && (frame.IsWet != r.briefedIsWet || math.Abs(float64(frame.TrackTempC-r.briefedTrackTempC)) >= 3.0) {
+			meta := r.source.SessionMetadata()
+			r.briefedTrackTempC = frame.TrackTempC
+			r.briefedIsWet = frame.IsWet
+			r.uploader.EnqueueBriefing(transport.BriefingRequest{
+				TrackSlug:     meta.TrackSlug,
+				TrackName:     meta.TrackName,
+				TrackLengthKm: meta.TrackLengthKm,
+				CarName:       meta.CarName,
+				SessionID:     meta.SessionID,
+				SubSessionID:  meta.SubSessionID,
+				TrackTempC:    frame.TrackTempC,
+				AirTempC:      frame.AirTempC,
+				IsWet:         frame.IsWet,
+				FuelLevelL:    frame.FuelLevelL,
+				Reason:        "conditions_changed",
+			})
+		}
+	}
+
+	// 2. Real Tyre Pyrometer Check upon stopping in Pit Box or exiting to Garage
+	if frame.IsOnTrack && !onPitRoad && frame.Sample.Speed > 15.0 {
+		r.droveOnTrackThisStint = true
+		r.pitDebriefSent = false
+		r.pitStoppedTicks = 0
+		return
+	}
+
+	if r.droveOnTrackThisStint && !r.pitDebriefSent {
+		stoppedInPits := frame.IsOnTrack && onPitRoad && frame.Sample.Speed < 0.4
+		exitedToGarage := !frame.IsOnTrack
+
+		if stoppedInPits {
+			r.pitStoppedTicks++
+		}
+		if exitedToGarage || r.pitStoppedTicks >= 10 {
+			if frame.TyreLFTempC > 25.0 && frame.TyreRFTempC > 25.0 {
+				r.uploader.EnqueuePitStop(transport.PitStopRequest{
+					LFTempC:       frame.TyreLFTempC,
+					RFTempC:       frame.TyreRFTempC,
+					LRTempC:       frame.TyreLRTempC,
+					RRTempC:       frame.TyreRRTempC,
+					LapsCompleted: r.stintLaps,
+				})
+			}
+			r.pitDebriefSent = true
+			r.droveOnTrackThisStint = false
+			r.pitStoppedTicks = 0
+			r.stintLaps = 0
+		}
+	}
+}
+
 func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFrame) {
 	batch := r.ring.SnapshotAndReset(r.pool)
 	if batch == nil {
@@ -205,6 +301,11 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 	}
 	isClean := !r.lapDirty && incDelta == 0
 
+	var fuelUsedL float32
+	if r.lapStartFuelL > crossingFrame.FuelLevelL && (r.lapStartFuelL-crossingFrame.FuelLevelL) < 35.0 {
+		fuelUsedL = r.lapStartFuelL - crossingFrame.FuelLevelL
+	}
+
 	meta := r.source.SessionMetadata()
 	completed := telemetry.CompletedLap{
 		UserID:        r.cfg.UserID,
@@ -221,6 +322,8 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 		TrackTempC:    crossingFrame.TrackTempC,
 		AirTempC:      crossingFrame.AirTempC,
 		IsWet:         crossingFrame.IsWet,
+		FuelLevelL:    crossingFrame.FuelLevelL,
+		FuelUsedL:     fuelUsedL,
 		SampleRateHz:  r.cfg.SampleRateHz,
 	}
 
@@ -229,6 +332,8 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 			slog.Int("lap", int(completed.LapNumber)),
 			slog.Uint64("lap_time_ms", uint64(completed.LapTimeMs)),
 			slog.Bool("is_clean", completed.IsClean),
+			slog.Float64("fuel_l", float64(completed.FuelLevelL)),
+			slog.Float64("fuel_used_l", float64(completed.FuelUsedL)),
 			slog.String("track", completed.TrackName),
 			slog.String("car", completed.CarName),
 			slog.Int("samples", len(batch.Samples)),

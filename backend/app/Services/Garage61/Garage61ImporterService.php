@@ -173,6 +173,8 @@ class Garage61ImporterService
             'track_temp_c' => $normalizedMeta['track_temp_c'],
             'air_temp_c' => $normalizedMeta['air_temp_c'],
             'is_wet' => $normalizedMeta['is_wet'],
+            'fuel_level_l' => $normalizedMeta['fuel_level_l'],
+            'fuel_used_l' => $normalizedMeta['fuel_used_l'],
             'source' => $source,
             'external_id' => $lapId,
             'driver_name' => $normalizedMeta['driver_name'] ?: null,
@@ -404,12 +406,21 @@ class Garage61ImporterService
         $wetnessPct = (int) ($lap['trackWetness'] ?? 0);
         $isWet = $wetnessPct >= 5 || (bool) ($lap['is_wet'] ?? false);
 
+        $fuelLevel = isset($lap['fuelLevel']) && (float) $lap['fuelLevel'] > 0
+            ? round((float) $lap['fuelLevel'], 2)
+            : null;
+        $fuelUsed = isset($lap['fuelUsed']) && (float) $lap['fuelUsed'] > 0
+            ? round((float) $lap['fuelUsed'], 3)
+            : null;
+
         return [
             'id' => (string) ($lap['id'] ?? ''),
             'lap_time_ms' => $lapTimeMs,
             'track_temp_c' => round($trackTemp, 1),
             'air_temp_c' => round($airTemp, 1),
             'is_wet' => $isWet,
+            'fuel_level_l' => $fuelLevel,
+            'fuel_used_l' => $fuelUsed,
             'driver_name' => $driverName,
             'track_name' => $trackName !== '' ? $trackName : $fallbackTrack,
             'track_slug' => Str::slug($trackName !== '' ? $trackName : $fallbackTrack),

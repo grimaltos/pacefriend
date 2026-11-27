@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
+use App\Services\Coaching\RadioEngineerService;
 use App\Services\Garage61\Garage61ClientService;
 use App\Services\Garage61\Garage61OAuthService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -56,7 +58,13 @@ class SettingsController extends Controller
                 'reference_scope' => $user->reference_scope ?: 'team_then_public',
                 'autopilot_mode' => in_array($user->autopilot_mode, ['fastest', 'alien'], true) ? 'fastest' : 'progressive',
                 'autopilot_delta_ms' => $user->autopilot_delta_ms ?: 1000,
+                'radio' => $user->radioSettings(),
             ],
+            'voiceCatalog' => config('pacefriend.voice.edge.voices', [
+                'es-ES-AlvaroNeural' => 'Álvaro (Ingeniero · España)',
+                'es-ES-XimenaNeural' => 'Ximena (Ingeniera · Natural)',
+                'es-ES-ElviraNeural' => 'Elvira (Ingeniera · España)',
+            ]),
             'tokens' => $user->tokens()
                 ->orderByDesc('created_at')
                 ->get(['id', 'name', 'last_used_at', 'created_at']),
@@ -81,6 +89,61 @@ class SettingsController extends Controller
         ]);
 
         return back()->with('success', "Perfil actualizado. El ingeniero te llamará \"{$user->effectiveCallsign()}\".");
+    }
+
+    public function updateRadio(Request $request): RedirectResponse
+    {
+        $allowedVoices = implode(',', array_keys(config('pacefriend.voice.edge.voices', [
+            'es-ES-AlvaroNeural' => 'Álvaro',
+            'es-ES-XimenaNeural' => 'Ximena',
+            'es-ES-ElviraNeural' => 'Elvira',
+        ])));
+
+        $validated = $request->validate([
+            'voice_id' => ['required', 'string', "in:{$allowedVoices}"],
+            'volume' => ['required', 'integer', 'min:0', 'max:100'],
+            'radio_beep' => ['required', 'boolean'],
+            'pit_wall_fx' => ['required', 'boolean'],
+            'finish_callout_mode' => ['required', 'in:full,improvements,off'],
+            'min_clean_laps' => ['required', 'integer', 'min:2', 'max:5'],
+            'fuel_alerts' => ['required', 'boolean'],
+            'tyre_temp_alerts' => ['required', 'boolean'],
+        ]);
+
+        $user = $request->user();
+        $prefs = $user->preferences ?? [];
+        $prefs['radio_voice_id'] = $validated['voice_id'];
+        $prefs['radio_volume'] = (int) $validated['volume'];
+        $prefs['radio_beep'] = (bool) $validated['radio_beep'];
+        $prefs['pit_wall_fx'] = (bool) $validated['pit_wall_fx'];
+        $prefs['finish_callout_mode'] = $validated['finish_callout_mode'];
+        $prefs['min_clean_laps'] = (int) $validated['min_clean_laps'];
+        $prefs['fuel_alerts'] = (bool) $validated['fuel_alerts'];
+        $prefs['tyre_temp_alerts'] = (bool) $validated['tyre_temp_alerts'];
+
+        $user->forceFill(['preferences' => $prefs])->save();
+
+        return back()->with('success', 'Ajustes de voz, efectos de radio y avisos en pista actualizados.');
+    }
+
+    public function previewRadio(Request $request, RadioEngineerService $radioEngineer): JsonResponse
+    {
+        $allowedVoices = implode(',', array_keys(config('pacefriend.voice.edge.voices', [
+            'es-ES-AlvaroNeural' => 'Álvaro',
+            'es-ES-XimenaNeural' => 'Ximena',
+            'es-ES-ElviraNeural' => 'Elvira',
+        ])));
+
+        $validated = $request->validate([
+            'voice_id' => ['required', 'string', "in:{$allowedVoices}"],
+            'volume' => ['required', 'integer', 'min:0', 'max:100'],
+            'radio_beep' => ['required', 'boolean'],
+            'pit_wall_fx' => ['required', 'boolean'],
+        ]);
+
+        $preview = $radioEngineer->buildPreviewClip($request->user(), $validated);
+
+        return response()->json($preview);
     }
 
     public function redirectToGarage61(Request $request, Garage61OAuthService $g61OAuth): RedirectResponse

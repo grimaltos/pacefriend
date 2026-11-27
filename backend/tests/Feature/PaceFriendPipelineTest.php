@@ -148,6 +148,123 @@ class PaceFriendPipelineTest extends TestCase
         $zip->close();
     }
 
+    public function test_radio_settings_briefing_fuel_alerts_positive_reinforcement_and_pit_tyre_debrief(): void
+    {
+        $user = User::factory()->create([
+            'name' => 'Vicent Grimaltos',
+            'driver_callsign' => 'Vicent',
+        ]);
+
+        // 1. Configure Ximena neural voice, 70% volume, 2 clean laps threshold
+        $this->actingAs($user)->put('/settings/radio', [
+            'voice_id' => 'es-ES-XimenaNeural',
+            'volume' => 70,
+            'radio_beep' => true,
+            'pit_wall_fx' => true,
+            'finish_callout_mode' => 'full',
+            'min_clean_laps' => 2,
+            'fuel_alerts' => true,
+            'tyre_temp_alerts' => true,
+        ])->assertRedirect();
+
+        $user->refresh();
+        $this->assertSame('es-ES-XimenaNeural', $user->radioSettings()['voice_id']);
+        $this->assertSame(70, $user->radioSettings()['volume']);
+        $this->assertSame(2, $user->radioSettings()['min_clean_laps']);
+
+        // 2. Preview radio clip & verify content-addressed SHA-256 matches served bytes
+        $previewResp = $this->actingAs($user)->postJson('/settings/radio/preview', [
+            'voice_id' => 'es-ES-XimenaNeural',
+            'volume' => 70,
+            'radio_beep' => true,
+            'pit_wall_fx' => true,
+        ]);
+        $previewResp->assertOk();
+        $previewSha = $previewResp->json('sha256');
+        $rawClip = $this->get("/api/v1/audio/{$previewSha}");
+        $rawClip->assertOk();
+        $this->assertSame($previewSha, hash('sha256', $rawClip->getContent()));
+
+        // Attach target fuel to seeded reference so fuel delta is reported in briefing
+        $spa = Track::query()->where('slug', 'spa-up')->firstOrFail();
+        $ref = ReferenceLap::query()->where('track_id', $spa->id)->where('track_temp_c', '<', 25.0)->firstOrFail();
+        $ref->update(['fuel_level_l' => 16.0, 'fuel_used_l' => 2.7]);
+
+        $token = $user->createToken('SimRig')->plainTextToken;
+
+        // 3. Out-lap Briefing with 52L vs 16L target (+36L weight delta)
+        $briefResp = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/briefing', [
+                'track_slug' => 'spa-up',
+                'track_name' => 'Circuit de Spa-Francorchamps',
+                'track_length_km' => 7.004,
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 7701,
+                'sub_session_id' => 8801,
+                'track_temp_c' => 21.5,
+                'air_temp_c' => 17.0,
+                'is_wet' => false,
+                'fuel_level_l' => 52.0,
+                'reason' => 'session_start',
+            ]);
+        $briefResp->assertOk();
+        $this->assertSame(70, $briefResp->json('audio_settings.volume'));
+        $briefText = $briefResp->json('radio_callouts.0.text');
+        $this->assertStringContainsString('Buenas Vicent', $briefText);
+        $this->assertStringContainsString('36 litros más que el target', $briefText);
+
+        // 4. Two clean laps -> Lap 2 triggers PB positive reinforcement + 2-lap coaching plan + 3-lap fuel warning
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/lap', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 7701,
+                'sub_session_id' => 8801,
+                'lap_number' => 1,
+                'lap_time_ms' => 139800,
+                'is_clean' => true,
+                'track_temp_c' => 21.5,
+                'air_temp_c' => 17.0,
+                'fuel_level_l' => 10.5,
+                'fuel_used_l' => 2.8,
+                'samples' => $this->buildDriverEarlyBrakingSamples(139800),
+            ])->assertCreated();
+
+        $lap2 = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/lap', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 7701,
+                'sub_session_id' => 8801,
+                'lap_number' => 2,
+                'lap_time_ms' => 139200,
+                'is_clean' => true,
+                'track_temp_c' => 21.5,
+                'air_temp_c' => 17.0,
+                'fuel_level_l' => 7.7, // ~2.75 laps left -> triggers 3-lap fuel alert!
+                'fuel_used_l' => 2.8,
+                'samples' => $this->buildDriverEarlyBrakingSamples(139200),
+            ]);
+        $lap2->assertCreated();
+        $this->assertNotNull($lap2->json('coaching_plan'), 'Expected coaching plan after 2 clean laps (custom threshold)');
+        $calloutTexts = implode(' | ', array_column($lap2->json('radio_callouts'), 'text'));
+        $this->assertStringContainsString('Buena vuelta Vicent', $calloutTexts);
+        $this->assertStringContainsString('tres vueltas', $calloutTexts);
+
+        // 5. Pit-stop real tyre pyrometer check (overheated LF = 99.4 °C)
+        $pitResp = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/pit-stop', [
+                'lf_temp_c' => 99.4,
+                'rf_temp_c' => 88.0,
+                'lr_temp_c' => 85.5,
+                'rr_temp_c' => 84.2,
+                'laps_completed' => 2,
+            ]);
+        $pitResp->assertOk();
+        $this->assertStringContainsString('delantera izquierda', $pitResp->json('radio_callouts.0.text'));
+        $this->assertStringContainsString('99 grados', $pitResp->json('radio_callouts.0.text'));
+    }
+
     /**
      * Synthesize a byte-exact binary .ibt telemetry buffer for testing IbtFileParserService.
      */

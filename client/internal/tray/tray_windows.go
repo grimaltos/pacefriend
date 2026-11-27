@@ -44,6 +44,7 @@ const (
 	cmdToggleMute = 1001
 	cmdOpenPanel  = 1002
 	cmdExitApp    = 1003
+	cmdTestRadio  = 1004
 )
 
 var (
@@ -268,6 +269,10 @@ func (m *Manager) showContextMenu(hwnd uintptr) {
 	appendMenuItem(hMenu, mfString|mfGrayed, 0, "PaceFriend · "+status)
 	_, _, _ = procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
 
+	if m.opts.OnTestRadio != nil {
+		appendMenuItem(hMenu, mfString, cmdTestRadio, "Probar Radio del Ingeniero")
+	}
+
 	muteFlags := uintptr(mfString)
 	if m.opts.IsMuted != nil && m.opts.IsMuted() {
 		muteFlags |= mfChecked
@@ -297,6 +302,10 @@ func (m *Manager) showContextMenu(hwnd uintptr) {
 	_, _, _ = procPostMessageW.Call(hwnd, wmNull, 0, 0)
 
 	switch cmd {
+	case cmdTestRadio:
+		if m.opts.OnTestRadio != nil {
+			m.opts.OnTestRadio()
+		}
 	case cmdToggleMute:
 		if m.opts.OnToggleMute != nil {
 			m.opts.OnToggleMute()

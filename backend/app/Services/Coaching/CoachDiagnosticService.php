@@ -28,8 +28,9 @@ class CoachDiagnosticService
         string $carName,
         ?ReferenceLap $referenceLap
     ): array {
+        $radio = $user->radioSettings();
         $windowSize = (int) config('pacefriend.clean_laps_window', 5);
-        $minLaps = (int) config('pacefriend.min_chronic_occurrences', 3);
+        $minLaps = (int) $radio['min_clean_laps'];
 
         $recentCleanLaps = Lap::query()
             ->where('user_id', $user->id)
@@ -63,8 +64,8 @@ class CoachDiagnosticService
         $callsign = $user->spokenCallsign();
         [$preBrakeText, $postExitText] = $this->translateHabitToNaturalSpeech($callsign, $bottleneck);
 
-        $preAudio = $this->voiceManager->ensureAudioClip($preBrakeText);
-        $postAudio = $this->voiceManager->ensureAudioClip($postExitText);
+        $preAudio = $this->voiceManager->ensureAudioClip($preBrakeText, $radio);
+        $postAudio = $this->voiceManager->ensureAudioClip($postExitText, $radio);
 
         $preTriggerPct = $this->normalizer->wrapPct((float) $bottleneck['brake_pct'] - 0.040);
         $postTriggerPct = $this->normalizer->wrapPct((float) $bottleneck['exit_pct'] + 0.012);

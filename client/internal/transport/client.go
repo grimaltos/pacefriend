@@ -17,12 +17,49 @@ import (
 	"github.com/pacefriend/client/internal/telemetry"
 )
 
+// AudioSettings carries live-synced audio preferences from the PaceFriend web panel.
+type AudioSettings struct {
+	Volume *int `json:"volume,omitempty"`
+}
+
 // LapResponse mirrors the JSON response returned by POST /api/v1/telemetry/lap.
 type LapResponse struct {
-	Status          string         `json:"status"`
-	LapStored       bool           `json:"lap_stored"`
-	CleanLapsWindow int            `json:"clean_laps_window"`
-	CoachingPlan    *coaching.Plan `json:"coaching_plan"`
+	Status          string             `json:"status"`
+	LapStored       bool               `json:"lap_stored"`
+	CleanLapsWindow int                `json:"clean_laps_window"`
+	CoachingPlan    *coaching.Plan     `json:"coaching_plan"`
+	RadioCallouts   []coaching.Callout `json:"radio_callouts,omitempty"`
+	AudioSettings   *AudioSettings     `json:"audio_settings,omitempty"`
+}
+
+// BriefingRequest is sent once upon entering track or when weather conditions shift.
+type BriefingRequest struct {
+	TrackSlug     string  `json:"track_slug"`
+	TrackName     string  `json:"track_name,omitempty"`
+	TrackLengthKm float64 `json:"track_length_km,omitempty"`
+	CarName       string  `json:"car_name"`
+	SessionID     int     `json:"session_id,omitempty"`
+	SubSessionID  int     `json:"sub_session_id,omitempty"`
+	TrackTempC    float32 `json:"track_temp_c"`
+	AirTempC      float32 `json:"air_temp_c"`
+	IsWet         bool    `json:"is_wet"`
+	FuelLevelL    float32 `json:"fuel_level_l,omitempty"`
+	Reason        string  `json:"reason"`
+}
+
+// PitStopRequest carries unlocked tyre pyrometer readings upon stopping in pits or garage.
+type PitStopRequest struct {
+	LFTempC       float32 `json:"lf_temp_c"`
+	RFTempC       float32 `json:"rf_temp_c"`
+	LRTempC       float32 `json:"lr_temp_c"`
+	RRTempC       float32 `json:"rr_temp_c"`
+	LapsCompleted int     `json:"laps_completed"`
+}
+
+type genericRadioResponse struct {
+	Status        string             `json:"status"`
+	RadioCallouts []coaching.Callout `json:"radio_callouts,omitempty"`
+	AudioSettings *AudioSettings     `json:"audio_settings,omitempty"`
 }
 
 // Config configures the background HTTP uploader.
@@ -39,8 +76,13 @@ type uploadJob struct {
 	batch *buffer.SampleBatch
 }
 
-// Uploader dispatches completed laps asynchronously in a dedicated background
-// worker so network latency never blocks or allocates inside the 20 Hz loop.
+type asyncEvent struct {
+	endpoint string
+	payload  any
+}
+
+// Uploader dispatches completed laps and live engineer events asynchronously in
+// dedicated background workers so network latency never blocks or allocates inside the 20 Hz loop.
 type Uploader struct {
 	baseURL   string
 	endpoint  string
@@ -52,13 +94,14 @@ type Uploader struct {
 	logger    *slog.Logger
 	bufPool   sync.Pool
 	jobs      chan uploadJob
+	events    chan asyncEvent
 	wg        sync.WaitGroup
 }
 
 // NewUploader constructs a non-blocking HTTP telemetry uploader.
 func NewUploader(cfg Config, pool *buffer.SnapshotPool, evaluator *coaching.Evaluator, speaker coaching.Speaker) *Uploader {
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 8 * time.Second
+		cfg.Timeout = 14 * time.Second
 	}
 	if cfg.QueueLength <= 0 {
 		cfg.QueueLength = 6
@@ -79,6 +122,7 @@ func NewUploader(cfg Config, pool *buffer.SnapshotPool, evaluator *coaching.Eval
 		speaker:   speaker,
 		logger:    cfg.Logger,
 		jobs:      make(chan uploadJob, cfg.QueueLength),
+		events:    make(chan asyncEvent, 8),
 	}
 	u.bufPool.New = func() any {
 		return bytes.NewBuffer(make([]byte, 0, 256*1024))
@@ -86,9 +130,9 @@ func NewUploader(cfg Config, pool *buffer.SnapshotPool, evaluator *coaching.Eval
 	return u
 }
 
-// Start launches the background upload worker tied to ctx.
+// Start launches the background upload and event workers tied to ctx.
 func (u *Uploader) Start(ctx context.Context) {
-	u.wg.Add(1)
+	u.wg.Add(2)
 	go func() {
 		defer u.wg.Done()
 		for {
@@ -104,17 +148,66 @@ func (u *Uploader) Start(ctx context.Context) {
 			}
 		}
 	}()
+
+	go func() {
+		defer u.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-u.events:
+				if !ok {
+					return
+				}
+				u.processAsyncEvent(ctx, ev)
+			}
+		}
+	}()
 }
 
 // Close waits for queued lap uploads to finish cleanly and notifies session end.
 func (u *Uploader) Close() {
 	close(u.jobs)
+	close(u.events)
 	u.wg.Wait()
 	u.NotifySessionEnd()
 }
 
+// EnqueueBriefing requests a track/weather/fuel/target greeting asynchronously.
+func (u *Uploader) EnqueueBriefing(req BriefingRequest) {
+	if u.baseURL == "" || req.TrackSlug == "" || req.CarName == "" {
+		return
+	}
+	select {
+	case u.events <- asyncEvent{endpoint: "/api/v1/telemetry/briefing", payload: req}:
+	default:
+	}
+}
+
+// EnqueuePitStop sends unlocked pit-box/garage tyre temperatures asynchronously.
+func (u *Uploader) EnqueuePitStop(req PitStopRequest) {
+	if u.baseURL == "" {
+		return
+	}
+	select {
+	case u.events <- asyncEvent{endpoint: "/api/v1/telemetry/pit-stop", payload: req}:
+	default:
+	}
+}
+
+// TriggerRadioTest requests an immediate voice test clip (e.g. from the System Tray menu).
+func (u *Uploader) TriggerRadioTest() {
+	if u.baseURL == "" {
+		return
+	}
+	select {
+	case u.events <- asyncEvent{endpoint: "/api/v1/telemetry/radio-test", payload: map[string]string{}}:
+	default:
+	}
+}
+
 // SendHeartbeat notifies the PaceFriend web panel that the local Windows client is online
-// and reports its current status (e.g. waiting for iRacing vs connected on track).
+// and syncs live volume changes from the user's web settings.
 func (u *Uploader) SendHeartbeat(ctx context.Context, state string, trackName string) error {
 	if u.baseURL == "" {
 		return fmt.Errorf("missing api_url (check pacefriend.json)")
@@ -146,6 +239,11 @@ func (u *Uploader) SendHeartbeat(ctx context.Context, state string, trackName st
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("heartbeat HTTP %d", resp.StatusCode)
 	}
+
+	var parsed genericRadioResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&parsed); err == nil {
+		u.applyAudioSettings(parsed.AudioSettings)
+	}
 	return nil
 }
 
@@ -173,7 +271,6 @@ func (u *Uploader) NotifySessionEnd() {
 }
 
 // Enqueue schedules a completed lap for background HTTP POST without blocking.
-// If the queue is full (e.g. backend offline for many laps), the batch is recycled immediately.
 func (u *Uploader) Enqueue(lap telemetry.CompletedLap, batch *buffer.SampleBatch) bool {
 	if batch != nil {
 		lap.Samples = batch.Samples
@@ -192,6 +289,53 @@ func (u *Uploader) Enqueue(lap telemetry.CompletedLap, batch *buffer.SampleBatch
 	}
 }
 
+func (u *Uploader) processAsyncEvent(ctx context.Context, ev asyncEvent) {
+	if u.baseURL == "" {
+		return
+	}
+	raw, err := json.Marshal(ev.payload)
+	if err != nil {
+		return
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 14*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u.baseURL+ev.endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if u.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.apiToken)
+	}
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		if u.logger != nil {
+			u.logger.Warn("engineer radio event request failed", slog.String("endpoint", ev.endpoint), slog.Any("err", err))
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if u.logger != nil {
+			u.logger.Warn("engineer radio event rejected", slog.String("endpoint", ev.endpoint), slog.Int("status", resp.StatusCode))
+		}
+		return
+	}
+
+	var parsed genericRadioResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&parsed); err != nil {
+		return
+	}
+
+	u.applyAudioSettings(parsed.AudioSettings)
+	u.dispatchRadioCallouts(ctx, parsed.RadioCallouts)
+}
+
 func (u *Uploader) drainRemaining() {
 	for {
 		select {
@@ -199,7 +343,6 @@ func (u *Uploader) drainRemaining() {
 			if !ok {
 				return
 			}
-			// Attempt a short flush using a bounded background context before releasing pool memory.
 			flushCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			u.processJob(flushCtx, job)
 			cancel()
@@ -282,9 +425,10 @@ func (u *Uploader) processJob(ctx context.Context, job uploadJob) {
 		return
 	}
 
+	u.applyAudioSettings(parsed.AudioSettings)
+	u.dispatchRadioCallouts(ctx, parsed.RadioCallouts)
+
 	if parsed.CoachingPlan != nil {
-		// Pre-warm AI voice clips into RAM before activating the new coaching plan
-		// so spatial trigger playback has zero I/O latency on track.
 		if u.speaker != nil {
 			if err := u.speaker.Preload(ctx, parsed.CoachingPlan); err != nil && u.logger != nil {
 				u.logger.Warn("audio preload warning", slog.Any("err", err))
@@ -299,6 +443,26 @@ func (u *Uploader) processJob(ctx context.Context, job uploadJob) {
 				slog.String("focus_turn", parsed.CoachingPlan.FocusTurnName),
 				slog.Int("triggers", len(parsed.CoachingPlan.Triggers)),
 			)
+		}
+	}
+}
+
+func (u *Uploader) applyAudioSettings(settings *AudioSettings) {
+	if settings == nil || settings.Volume == nil {
+		return
+	}
+	if imm, ok := u.speaker.(coaching.ImmediateSpeaker); ok {
+		imm.SetVolume(*settings.Volume)
+	}
+}
+
+func (u *Uploader) dispatchRadioCallouts(ctx context.Context, callouts []coaching.Callout) {
+	if len(callouts) == 0 || u.speaker == nil {
+		return
+	}
+	if imm, ok := u.speaker.(coaching.ImmediateSpeaker); ok {
+		if err := imm.PlayCallouts(ctx, callouts); err != nil && u.logger != nil {
+			u.logger.Warn("radio callout playback warning", slog.Any("err", err))
 		}
 	}
 }

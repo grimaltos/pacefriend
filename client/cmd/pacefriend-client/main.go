@@ -74,8 +74,20 @@ func main() {
 		initialTrayStatus = "Sin pacefriend.json (extrae todo el ZIP)"
 	}
 
+	uploader := transport.NewUploader(transport.Config{
+		BaseURL:  *apiURL,
+		APIToken: *apiToken,
+		Logger:   logger,
+	}, pool, evaluator, speaker)
+	uploader.Start(ctx)
+	defer uploader.Close()
+
 	var trayMgr *tray.Manager
 	if !*noTray && !*simMode {
+		var testRadioCb func()
+		if *apiURL != "" && *apiToken != "" {
+			testRadioCb = uploader.TriggerRadioTest
+		}
 		trayMgr = tray.Start(tray.Options{
 			InitialStatus: initialTrayStatus,
 			PanelURL:      *apiURL,
@@ -83,7 +95,8 @@ func main() {
 			OnToggleMute: func() {
 				speaker.SetMuted(!speaker.IsMuted())
 			},
-			OnExit: stop,
+			OnTestRadio: testRadioCb,
+			OnExit:      stop,
 		})
 		defer trayMgr.Close()
 	}
@@ -112,14 +125,6 @@ func main() {
 			},
 		})
 	}
-
-	uploader := transport.NewUploader(transport.Config{
-		BaseURL:  *apiURL,
-		APIToken: *apiToken,
-		Logger:   logger,
-	}, pool, evaluator, speaker)
-	uploader.Start(ctx)
-	defer uploader.Close()
 
 	var hbState atomic.Value
 	hbState.Store(heartbeatState{state: "waiting_iracing", trackName: ""})

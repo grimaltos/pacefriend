@@ -29,8 +29,12 @@ RUN apk add --no-cache \
     libzip-dev \
     icu-dev \
     oniguruma-dev \
+    ffmpeg \
+    python3 \
+    py3-pip \
     curl \
     bash \
+    && pip3 install --no-cache-dir --break-system-packages edge-tts \
     && docker-php-ext-install -j$(nproc) \
         pdo_pgsql \
         pgsql \

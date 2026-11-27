@@ -173,6 +173,9 @@ func (s *SimulatorSource) advancePhysics(dt float64) {
 	binary.LittleEndian.PutUint32(row[48:52], math.Float32bits(31.5)) // TrackTempCrew (°C)
 	binary.LittleEndian.PutUint32(row[52:56], math.Float32bits(22.0)) // AirTemp (°C)
 	binary.LittleEndian.PutUint32(row[56:60], 1)                      // TrackWetness = 1 (Dry)
+	fuelL := float32(math.Max(2.0, 48.0-(float64(s.lap)+float64(pct))*2.8))
+	binary.LittleEndian.PutUint32(row[60:64], math.Float32bits(fuelL)) // FuelLevel (L)
+	row[64] = 1                                                        // IsOnTrack = true
 
 	// Publish updated tickCount for this buffer slot
 	binary.LittleEndian.PutUint32(s.mem[hdrVarBufBase:hdrVarBufBase+4], uint32(s.tickCount))
@@ -234,7 +237,7 @@ func gearForSpeed(speedMS float32, minGear int32) int32 {
 	return g
 }
 
-const simRowBufLen = 64
+const simRowBufLen = 80
 
 type simVarDef struct {
 	name    string
@@ -257,6 +260,8 @@ var simVars = []simVarDef{
 	{name: "TrackTempCrew", varType: VarTypeFloat, offset: 48},
 	{name: "AirTemp", varType: VarTypeFloat, offset: 52},
 	{name: "TrackWetness", varType: VarTypeInt, offset: 56},
+	{name: "FuelLevel", varType: VarTypeFloat, offset: 60},
+	{name: "IsOnTrack", varType: VarTypeBool, offset: 64},
 }
 
 func buildSyntheticShmBlock(yamlText string) []byte {

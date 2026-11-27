@@ -25,11 +25,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Natural AI Voice Synthesis (ElevenLabs + Local Dev Fallback)
+    | Natural AI Voice Synthesis (Edge Neural TTS + ElevenLabs + Offline Fallback)
     |--------------------------------------------------------------------------
     */
     'voice' => [
-        'driver' => env('PACEFRIEND_VOICE_DRIVER', 'local'), // local | elevenlabs
+        'driver' => env('PACEFRIEND_VOICE_DRIVER', 'edge'), // edge | elevenlabs | local
+        'edge' => [
+            'default_voice' => env('EDGE_TTS_VOICE', 'es-ES-AlvaroNeural'),
+            'rate' => env('EDGE_TTS_RATE', '+4%'),
+            'voices' => [
+                'es-ES-AlvaroNeural' => 'Álvaro (Ingeniero · España)',
+                'es-ES-XimenaNeural' => 'Ximena (Ingeniera · Natural)',
+                'es-ES-ElviraNeural' => 'Elvira (Ingeniera · España)',
+            ],
+        ],
         'elevenlabs' => [
             'api_key' => env('ELEVENLABS_API_KEY'),
             'voice_id' => env('ELEVENLABS_VOICE_ID', 'pNInz6obpgDQGcFmaJgB'),

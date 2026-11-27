@@ -20,6 +20,7 @@ type Options struct {
 	PanelURL      string
 	IsMuted       func() bool
 	OnToggleMute  func()
+	OnTestRadio   func()
 	OnExit        func()
 }
 

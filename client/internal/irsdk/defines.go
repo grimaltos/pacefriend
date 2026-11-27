@@ -165,12 +165,32 @@ type VarIndex struct {
 	LapLastLapTime           varSlot
 	PlayerTrackSurface       varSlot
 	OnPitRoad                varSlot
+	IsOnTrack                varSlot
 	PlayerCarMyIncidentCount varSlot
 	TrackTempCrew            varSlot
 	TrackTemp                varSlot
 	AirTemp                  varSlot
 	TrackWetness             varSlot
 	WeatherDeclaredWet       varSlot
+	FuelLevel                varSlot
+
+	// Pit-box / garage tyre pyrometer channels (unlocked by iRacing upon stopping in pits/garage)
+	LFtempCL varSlot
+	LFtempCM varSlot
+	LFtempCR varSlot
+	LFtempM  varSlot
+	RFtempCL varSlot
+	RFtempCM varSlot
+	RFtempCR varSlot
+	RFtempM  varSlot
+	LRtempCL varSlot
+	LRtempCM varSlot
+	LRtempCR varSlot
+	LRtempM  varSlot
+	RRtempCL varSlot
+	RRtempCM varSlot
+	RRtempCR varSlot
+	RRtempM  varSlot
 }
 
 // IndexVariables parses the irsdk_varHeader table and resolves byte offsets for all
@@ -220,6 +240,8 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.PlayerTrackSurface = slot
 		case "OnPitRoad":
 			idx.OnPitRoad = slot
+		case "IsOnTrack":
+			idx.IsOnTrack = slot
 		case "PlayerCarMyIncidentCount":
 			idx.PlayerCarMyIncidentCount = slot
 		case "TrackTempCrew":
@@ -232,6 +254,40 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.TrackWetness = slot
 		case "WeatherDeclaredWet":
 			idx.WeatherDeclaredWet = slot
+		case "FuelLevel":
+			idx.FuelLevel = slot
+		case "LFtempCL":
+			idx.LFtempCL = slot
+		case "LFtempCM":
+			idx.LFtempCM = slot
+		case "LFtempCR":
+			idx.LFtempCR = slot
+		case "LFtempM":
+			idx.LFtempM = slot
+		case "RFtempCL":
+			idx.RFtempCL = slot
+		case "RFtempCM":
+			idx.RFtempCM = slot
+		case "RFtempCR":
+			idx.RFtempCR = slot
+		case "RFtempM":
+			idx.RFtempM = slot
+		case "LRtempCL":
+			idx.LRtempCL = slot
+		case "LRtempCM":
+			idx.LRtempCM = slot
+		case "LRtempCR":
+			idx.LRtempCR = slot
+		case "LRtempM":
+			idx.LRtempM = slot
+		case "RRtempCL":
+			idx.RRtempCL = slot
+		case "RRtempCM":
+			idx.RRtempCM = slot
+		case "RRtempCR":
+			idx.RRtempCR = slot
+		case "RRtempM":
+			idx.RRtempM = slot
 		}
 	}
 
@@ -359,6 +415,23 @@ func ReadFrameFromMemory(mem []byte, idx *VarIndex, out *telemetry.RawFrame) (bo
 		}
 		out.IsWet = isWet
 
+		if idx.IsOnTrack.present {
+			out.IsOnTrack = readBool(row, idx.IsOnTrack)
+		} else {
+			out.IsOnTrack = true
+		}
+
+		if idx.FuelLevel.present {
+			out.FuelLevelL = readFloat32(row, idx.FuelLevel)
+		} else {
+			out.FuelLevelL = 0
+		}
+
+		out.TyreLFTempC = readTyreTempC(row, idx.LFtempCL, idx.LFtempCM, idx.LFtempCR, idx.LFtempM)
+		out.TyreRFTempC = readTyreTempC(row, idx.RFtempCL, idx.RFtempCM, idx.RFtempCR, idx.RFtempM)
+		out.TyreLRTempC = readTyreTempC(row, idx.LRtempCL, idx.LRtempCM, idx.LRtempCR, idx.LRtempM)
+		out.TyreRRTempC = readTyreTempC(row, idx.RRtempCL, idx.RRtempCM, idx.RRtempCR, idx.RRtempM)
+
 		// Re-read tickCount for this buffer slot to ensure iRacing did not overwrite
 		// the buffer mid-read (lock-free optimistic concurrency check).
 		tickPos := 48 + bestIdx*VarBufSize
@@ -414,6 +487,30 @@ func readInt32(row []byte, s varSlot) int32 {
 
 func readBool(row []byte, s varSlot) bool {
 	return row[s.offset] != 0
+}
+
+func readTyreTempC(row []byte, cl, cm, cr, fallbackM varSlot) float32 {
+	var sum float32
+	var count int
+	if cl.present {
+		sum += readFloat32(row, cl)
+		count++
+	}
+	if cm.present {
+		sum += readFloat32(row, cm)
+		count++
+	}
+	if cr.present {
+		sum += readFloat32(row, cr)
+		count++
+	}
+	if count > 0 {
+		return sum / float32(count)
+	}
+	if fallbackM.present {
+		return readFloat32(row, fallbackM)
+	}
+	return 0
 }
 
 func cString(b []byte) string {

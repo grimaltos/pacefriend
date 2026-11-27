@@ -141,3 +141,122 @@ func TestRunnerDiscardsOutLapAndUploadsCleanAndDirtyLaps(t *testing.T) {
 			uploaded[1].LapNumber, uploaded[1].IsClean, uploaded[1].LapTimeMs)
 	}
 }
+
+func TestRunnerSendsBriefingFuelMetricsAndPitTyreDebrief(t *testing.T) {
+	var mu sync.Mutex
+	var briefings []transport.BriefingRequest
+	var pitStops []transport.PitStopRequest
+	var laps []telemetry.CompletedLap
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/telemetry/briefing":
+			var b transport.BriefingRequest
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			mu.Lock()
+			briefings = append(briefings, b)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok","audio_settings":{"volume":75}}`))
+		case "/api/v1/telemetry/pit-stop":
+			var p transport.PitStopRequest
+			_ = json.NewDecoder(r.Body).Decode(&p)
+			mu.Lock()
+			pitStops = append(pitStops, p)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/telemetry/lap":
+			var l telemetry.CompletedLap
+			_ = json.NewDecoder(r.Body).Decode(&l)
+			mu.Lock()
+			laps = append(laps, l)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok","lap_stored":true}`))
+		default:
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}
+	}))
+	defer srv.Close()
+
+	pool := buffer.NewSnapshotPool(128)
+	ring := buffer.NewRingBuffer(256)
+	ev := coaching.NewEvaluator(nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	uploader := transport.NewUploader(transport.Config{BaseURL: srv.URL}, pool, ev, nil)
+	uploader.Start(ctx)
+
+	src := &stubSource{
+		meta: telemetry.SessionMetadata{
+			TrackSlug:     "spa-up",
+			TrackName:     "Circuit de Spa-Francorchamps",
+			TrackLengthKm: 7.004,
+			CarName:       "Porsche 911 GT3 R (992)",
+		},
+	}
+
+	runner := NewRunner(Config{
+		UserID:           "driver-vicent",
+		SampleRateHz:     20,
+		MinSamplesPerLap: 10,
+	}, src, ring, pool, ev, uploader)
+
+	now := time.Now()
+	// 1. Out-lap leaving pits onto track with 50L fuel -> triggers session_start briefing
+	runner.ProcessFrame(now, &telemetry.RawFrame{
+		IsOnTrack:  true,
+		TrackTempC: 24.0,
+		AirTempC:   18.5,
+		FuelLevelL: 50.0,
+		Sample:     telemetry.Sample{Lap: 0, LapDistPct: 0.95, Speed: 45.0, Gear: 3},
+	})
+
+	// 2. Clean Lap 1 burning 2.8L (50.0 -> 47.2)
+	for i := 0; i < 20; i++ {
+		pct := float32(i) * 0.05
+		runner.ProcessFrame(now, &telemetry.RawFrame{
+			IsOnTrack:      true,
+			SessionTimeSec: 10.0 + float64(i)*0.5,
+			TrackTempC:     24.0,
+			FuelLevelL:     50.0 - float32(i)*0.14,
+			Sample:         telemetry.Sample{Lap: 1, LapDistPct: pct, Speed: 68.0, Gear: 5},
+		})
+	}
+	runner.ProcessFrame(now, &telemetry.RawFrame{
+		IsOnTrack:         true,
+		SessionTimeSec:    148.0,
+		LapLastLapTimeSec: 138.0,
+		TrackTempC:        24.0,
+		FuelLevelL:        47.2,
+		Sample:            telemetry.Sample{Lap: 2, LapDistPct: 0.01, Speed: 70.0, Gear: 6},
+	})
+
+	// 3. Driver exits to garage -> iRacing unlocks real tyre temps
+	runner.ProcessFrame(now, &telemetry.RawFrame{
+		IsOnTrack:   false,
+		TyreLFTempC: 98.5,
+		TyreRFTempC: 89.0,
+		TyreLRTempC: 86.0,
+		TyreRRTempC: 85.0,
+		Sample:      telemetry.Sample{Lap: 2, LapDistPct: 0.10, Speed: 0.0},
+	})
+
+	// Give async event goroutine a brief moment before closing
+	time.Sleep(50 * time.Millisecond)
+	uploader.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(briefings) != 1 || briefings[0].Reason != "session_start" || briefings[0].FuelLevelL != 50.0 {
+		t.Fatalf("expected 1 session_start briefing with 50L fuel, got %+v", briefings)
+	}
+	if len(laps) != 1 || laps[0].FuelLevelL != 47.2 || laps[0].FuelUsedL < 2.7 {
+		t.Fatalf("expected Lap 1 fuel metrics, got %+v", laps)
+	}
+	if len(pitStops) != 1 || pitStops[0].LFTempC != 98.5 {
+		t.Fatalf("expected 1 pit/garage tyre debrief with LF=98.5, got %+v", pitStops)
+	}
+}

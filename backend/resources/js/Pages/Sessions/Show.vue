@@ -6,11 +6,32 @@ import { formatDeltaMs, formatLapTime, renderMarkdown } from '../../Utils/format
 
 const props = defineProps({
     session: Object,
+    focusTrajectoryMap: Object,
 });
 
 const generating = ref(false);
 
 const activeTriggers = computed(() => props.session.active_coaching_plan?.triggers || []);
+const breakdown = computed(() => props.session.active_coaching_plan?.telemetry_breakdown || null);
+
+const issueLabelMap = {
+    overdriving_entry: 'Causa raíz: Frenada tardía → Vértice perdido',
+    narrow_entry: 'Causa raíz: Entrada cerrada (falta abrirse al exterior)',
+    early_apex: 'Causa raíz: Giro prematuro (Early Apex → ahoga salida)',
+    early_braking: 'Causa raíz: Frenada conservadora temprana',
+    throttle_understeer: 'Causa raíz: Gas precipitado → Subviraje de salida',
+    understeer_scrub: 'Causa raíz: Exceso de volante (arrastre delantero)',
+    missed_apex: 'Causa raíz: Vértice abierto (lejos del piano interior)',
+    overslow_apex: 'Causa raíz: Exceso de freno residual en el vértice',
+    pinched_exit: 'Causa raíz: Salida ahogada (falta abrir dirección)',
+    late_throttle: 'Causa raíz: Apertura tardía de acelerador',
+    minimum_speed: 'Causa raíz: Velocidad de paso por curva',
+};
+
+function pointsToPolyline(pts) {
+    if (!pts?.length) return '';
+    return pts.map(([x, y]) => `${x},${y}`).join(' ');
+}
 
 function isBestSector(sectorNum, timeMs, isClean) {
     if (!isClean || !props.session.best_sectors_ms) return false;
@@ -106,25 +127,116 @@ function promoteLap(lapId) {
             </div>
         </div>
 
-        <!-- Active Real-Time Radio Coaching Plan -->
+        <!-- Active Real-Time Radio Coaching Plan + Causal Breakdown & 2D Trajectory Map -->
         <div v-if="session.active_coaching_plan?.focus_turn" class="mb-8 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-6">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                 <div>
-                    <span class="text-xs uppercase tracking-wider text-emerald-400 font-semibold">Última Orden Activa por Radio</span>
+                    <span class="text-xs uppercase tracking-wider text-emerald-400 font-semibold">Diagnóstico Causal Activo por Radio</span>
                     <h2 class="text-lg font-bold text-white">Foco en {{ session.active_coaching_plan.focus_turn_name }} (Curva {{ session.active_coaching_plan.focus_turn }})</h2>
+                    <p v-if="session.active_coaching_plan.primary_issue" class="text-xs text-amber-300 mt-0.5">
+                        {{ issueLabelMap[session.active_coaching_plan.primary_issue] || session.active_coaching_plan.primary_issue }}
+                    </p>
                 </div>
-                <span class="text-xs px-3 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                <span class="text-xs px-3 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30 shrink-0">
                     Pérdida media detectada: +{{ (session.active_coaching_plan.avg_time_loss_ms / 1000).toFixed(2) }}s
                 </span>
             </div>
 
-            <div class="grid md:grid-cols-2 gap-4">
-                <div v-for="trg in activeTriggers" :key="trg.id" class="rounded-xl bg-zinc-900/90 border border-zinc-800 p-4">
-                    <div class="flex items-center justify-between text-xs text-zinc-400 mb-1">
-                        <span class="uppercase font-semibold text-emerald-400">{{ trg.phase === 'pre_brake' ? 'Anticipación Pre-Frenada' : 'Feedback Salida de Curva' }}</span>
-                        <span class="font-mono">Trigger @ {{ (trg.trigger_pct * 100).toFixed(1) }}% pista</span>
+            <!-- Causal Telemetry Metrics Bar -->
+            <div v-if="breakdown" class="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-5 text-xs">
+                <div class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
+                    <div class="text-zinc-500">Punto Frenada</div>
+                    <div class="font-mono font-semibold text-zinc-100">
+                        {{ breakdown.early_brake_m >= 0 ? `${breakdown.early_brake_m}m antes` : `${Math.abs(breakdown.early_brake_m)}m tarde` }}
                     </div>
-                    <p class="text-sm text-zinc-100 italic">“{{ trg.text }}”</p>
+                </div>
+                <div v-if="breakdown.has_trajectory" class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
+                    <div class="text-zinc-500">Línea Entrada</div>
+                    <div class="font-mono font-semibold" :class="breakdown.entry_inside_m >= 1.1 ? 'text-amber-300' : 'text-emerald-300'">
+                        {{ breakdown.entry_inside_m >= 0 ? `${breakdown.entry_inside_m}m cerrado` : `${Math.abs(breakdown.entry_inside_m)}m abierto` }}
+                    </div>
+                </div>
+                <div v-if="breakdown.has_trajectory" class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
+                    <div class="text-zinc-500">Paso Vértice</div>
+                    <div class="font-mono font-semibold" :class="breakdown.apex_inside_m <= -1.0 ? 'text-rose-300' : 'text-emerald-300'">
+                        {{ breakdown.apex_inside_m < 0 ? `${Math.abs(breakdown.apex_inside_m)}m fuera` : `Clavado (${breakdown.apex_inside_m}m)` }}
+                    </div>
+                </div>
+                <div v-if="breakdown.has_trajectory" class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
+                    <div class="text-zinc-500">Ancho Salida</div>
+                    <div class="font-mono font-semibold" :class="breakdown.exit_inside_m >= 1.25 ? 'text-amber-300' : 'text-emerald-300'">
+                        {{ breakdown.exit_inside_m >= 0 ? `${breakdown.exit_inside_m}m sin usar` : `${Math.abs(breakdown.exit_inside_m)}m exterior` }}
+                    </div>
+                </div>
+                <div class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
+                    <div class="text-zinc-500">Subviraje / Gas</div>
+                    <div class="font-mono font-semibold" :class="breakdown.understeer_deg >= 18 ? 'text-amber-300' : 'text-zinc-100'">
+                        {{ breakdown.understeer_deg > 0 ? `+${breakdown.understeer_deg}° vol.` : `Gas +${breakdown.late_throttle_m}m` }}
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid lg:grid-cols-3 gap-4 items-stretch">
+                <div class="lg:col-span-2 grid md:grid-cols-2 gap-4">
+                    <div v-for="trg in activeTriggers" :key="trg.id" class="rounded-xl bg-zinc-900/90 border border-zinc-800 p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="flex items-center justify-between text-xs text-zinc-400 mb-2">
+                                <span class="uppercase font-semibold text-emerald-400">{{ trg.phase === 'pre_brake' ? 'Anticipación Pre-Frenada' : 'Feedback Salida de Curva' }}</span>
+                                <span class="font-mono">Trigger @ {{ (trg.trigger_pct * 100).toFixed(1) }}%</span>
+                            </div>
+                            <p class="text-sm text-zinc-100 italic">“{{ trg.text }}”</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2D Top-Down Trajectory Comparison Mini-Map -->
+                <div v-if="focusTrajectoryMap" class="rounded-xl bg-zinc-950 border border-zinc-800 p-4 flex flex-col">
+                    <div class="flex items-center justify-between text-[11px] text-zinc-400 mb-2">
+                        <span class="font-semibold text-zinc-200">Mapa 2D Trazada ({{ focusTrajectoryMap.name }})</span>
+                        <div class="flex items-center gap-2.5">
+                            <span class="inline-flex items-center gap-1 text-emerald-400"><span class="w-2.5 h-0.5 bg-emerald-400 inline-block"></span>Target</span>
+                            <span class="inline-flex items-center gap-1 text-amber-400"><span class="w-2.5 h-0.5 bg-amber-400 inline-block"></span>Tú</span>
+                        </div>
+                    </div>
+                    <svg :viewBox="focusTrajectoryMap.view_box" class="w-full h-44 rounded-lg bg-zinc-900/60 p-1">
+                        <!-- Asphalt corridor -->
+                        <polyline
+                            :points="pointsToPolyline(focusTrajectoryMap.ref_points)"
+                            fill="none"
+                            stroke="#27272a"
+                            stroke-width="10"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        />
+                        <!-- Target reference line -->
+                        <polyline
+                            :points="pointsToPolyline(focusTrajectoryMap.ref_points)"
+                            fill="none"
+                            stroke="#34d399"
+                            stroke-width="1.6"
+                            stroke-dasharray="3,2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        />
+                        <!-- Driver line -->
+                        <polyline
+                            :points="pointsToPolyline(focusTrajectoryMap.driver_points)"
+                            fill="none"
+                            stroke="#fbbf24"
+                            stroke-width="1.8"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        />
+                        <!-- Apex marker -->
+                        <circle
+                            v-if="focusTrajectoryMap.markers?.apex"
+                            :cx="focusTrajectoryMap.markers.apex[0]"
+                            :cy="focusTrajectoryMap.markers.apex[1]"
+                            r="2.4"
+                            fill="#10b981"
+                        />
+                    </svg>
+                    <p class="text-[10px] text-zinc-500 mt-1.5 text-center">Entrada desde abajo hacia arriba · Punto verde = Vértice referencia</p>
                 </div>
             </div>
         </div>

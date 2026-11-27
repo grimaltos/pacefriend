@@ -140,6 +140,10 @@ class TelemetryLapController extends Controller
             'samples.*.brake' => ['required', 'numeric'],
             'samples.*.gear' => ['required', 'integer'],
             'samples.*.flags' => ['nullable', 'integer', 'min:0'],
+            'samples.*.lat' => ['nullable', 'numeric'],
+            'samples.*.lon' => ['nullable', 'numeric'],
+            'samples.*.steer' => ['nullable', 'numeric'],
+            'samples.*.yaw' => ['nullable', 'numeric'],
         ]);
 
         /** @var User $user */
@@ -356,6 +360,10 @@ class TelemetryLapController extends Controller
             'samples.*.brake' => ['required', 'numeric'],
             'samples.*.gear' => ['required', 'integer'],
             'samples.*.flags' => ['nullable', 'integer', 'min:0'],
+            'samples.*.lat' => ['nullable', 'numeric'],
+            'samples.*.lon' => ['nullable', 'numeric'],
+            'samples.*.steer' => ['nullable', 'numeric'],
+            'samples.*.yaw' => ['nullable', 'numeric'],
         ]);
 
         /** @var User $user */

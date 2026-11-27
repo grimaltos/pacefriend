@@ -11,15 +11,19 @@ const (
 	FlagIncident  SampleFlags = 1 << 2 // PlayerCarMyIncidentCount increased
 )
 
-// Sample is a pointer-free (noscan) 28-byte telemetry point stored at 20 Hz.
+// Sample is a pointer-free (noscan) 56-byte telemetry point stored at 20 Hz.
 // Keeping this struct strictly free of pointers ensures Go's garbage collector
 // never scans the ring buffer backing array, guaranteeing zero GC impact.
 type Sample struct {
+	Lat         float64     `json:"lat,omitempty"`
+	Lon         float64     `json:"lon,omitempty"`
 	TimestampMs uint32      `json:"t_ms"`
 	LapDistPct  float32     `json:"pct"`
 	Speed       float32     `json:"speed"`
 	Throttle    float32     `json:"throttle"`
 	Brake       float32     `json:"brake"`
+	Steer       float32     `json:"steer,omitempty"`
+	YawRate     float32     `json:"yaw,omitempty"`
 	Lap         int32       `json:"lap"`
 	Gear        int16       `json:"gear"`
 	Flags       SampleFlags `json:"flags"`

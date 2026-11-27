@@ -4,7 +4,10 @@ namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
 use App\Models\DrivingSession;
+use App\Models\Lap;
+use App\Models\ReferenceLap;
 use App\Services\Reports\ProSessionReportService;
+use App\Services\Telemetry\TelemetryNormalizerService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -14,6 +17,7 @@ class DrivingSessionController extends Controller
 {
     public function __construct(
         private readonly ProSessionReportService $reportService,
+        private readonly TelemetryNormalizerService $normalizer,
     ) {}
 
     public function index(Request $request): Response
@@ -44,8 +48,11 @@ class DrivingSessionController extends Controller
             'report',
         ]);
 
+        $focusTrajectoryMap = $this->resolveFocusCornerMap($session);
+
         return Inertia::render('Sessions/Show', [
             'session' => $session,
+            'focusTrajectoryMap' => $focusTrajectoryMap,
         ]);
     }
 
@@ -71,5 +78,44 @@ class DrivingSessionController extends Controller
         $this->reportService->generateForSession($session);
 
         return back()->with('success', 'Informe PRO generado por tu ingeniero de pista.');
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function resolveFocusCornerMap(DrivingSession $session): ?array
+    {
+        $focusTurn = (int) ($session->active_coaching_plan['focus_turn'] ?? 0);
+        if ($focusTurn <= 0 || $session->active_reference_lap_id === null || empty($session->track?->corners)) {
+            return null;
+        }
+
+        $cornerDef = null;
+        foreach ($session->track->corners as $c) {
+            if ((int) ($c['turn'] ?? 0) === $focusTurn) {
+                $cornerDef = $c;
+                break;
+            }
+        }
+        if ($cornerDef === null) {
+            return null;
+        }
+
+        $fullRef = ReferenceLap::query()->find($session->active_reference_lap_id);
+        $latestLap = Lap::query()
+            ->where('driving_session_id', $session->id)
+            ->whereNotNull('samples')
+            ->latest('id')
+            ->first(['id', 'samples']);
+
+        if ($fullRef === null || $latestLap === null) {
+            return null;
+        }
+
+        return $this->normalizer->buildCornerTrajectoryMap(
+            $fullRef,
+            $latestLap->samples ?? [],
+            $cornerDef
+        );
     }
 }

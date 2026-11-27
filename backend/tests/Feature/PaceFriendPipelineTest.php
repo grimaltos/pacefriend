@@ -340,6 +340,141 @@ class PaceFriendPipelineTest extends TestCase
         $this->assertGreaterThan(100000, $session->optimal_lap_time_ms);
     }
 
+    public function test_causal_trajectory_diagnoses_narrow_entry_root_cause_and_builds_2d_corner_map(): void
+    {
+        $user = User::factory()->create([
+            'name' => 'Vicent Grimaltos',
+            'driver_callsign' => 'Vicent',
+            'preferences' => ['min_clean_laps' => 2],
+        ]);
+        $spa = Track::query()->where('slug', 'spa-up')->firstOrFail();
+        $normalizer = app(\App\Services\Telemetry\TelemetryNormalizerService::class);
+
+        // Create a reference lap with 64-bit Lat/Lon trajectory & steering at 25.0 °C
+        $refSamples = $this->buildGeoTrajectorySamples(138000, narrowEntryTurn5Meters: 0.0, lateThrottleTurn5: false);
+        $ref = ReferenceLap::query()->create([
+            'user_id' => $user->id,
+            'track_id' => $spa->id,
+            'car_name' => 'Porsche 911 GT3 R (992)',
+            'label' => 'Ref GPS Spa 25C',
+            'lap_time_ms' => 138000,
+            'track_temp_c' => 25.0,
+            'air_temp_c' => 19.0,
+            'is_wet' => false,
+            'is_pinned' => true,
+            'source' => 'ibt_upload',
+            'normalized_points' => $normalizer->normalizeSamples($refSamples),
+            'corner_baselines' => $normalizer->extractCornerBaselines($refSamples, $spa->corners ?? [], 138000, $spa->length_km, true),
+        ]);
+
+        // Driver enters Turn 5 (Les Combes, right-hander) 1.8m too far inside (narrow entry) AND opens throttle late as a result!
+        $token = $user->createToken('SimRig')->plainTextToken;
+        $lastResp = null;
+
+        for ($lapNum = 1; $lapNum <= 2; $lapNum++) {
+            $drvSamples = $this->buildGeoTrajectorySamples(139200, narrowEntryTurn5Meters: 1.8, lateThrottleTurn5: true);
+            $lastResp = $this->withHeader('Authorization', "Bearer {$token}")
+                ->postJson('/api/v1/telemetry/lap', [
+                    'track_slug' => 'spa-up',
+                    'car_name' => 'Porsche 911 GT3 R (992)',
+                    'session_id' => 9501,
+                    'sub_session_id' => 9601,
+                    'lap_number' => $lapNum,
+                    'lap_time_ms' => 139200,
+                    'is_clean' => true,
+                    'track_temp_c' => 25.0,
+                    'air_temp_c' => 19.0,
+                    'samples' => $drvSamples,
+                ]);
+            $lastResp->assertCreated();
+        }
+
+        // Root cause MUST be 'narrow_entry' (entry trajectory), NOT 'late_throttle' symptom!
+        $plan = $lastResp->json('coaching_plan');
+        $this->assertNotNull($plan);
+        $this->assertSame('narrow_entry', $plan['primary_issue']);
+        $this->assertTrue($plan['telemetry_breakdown']['has_trajectory']);
+        $this->assertGreaterThan(1.2, $plan['telemetry_breakdown']['entry_inside_m']);
+        $this->assertStringContainsString('ábrete bien', $plan['triggers'][0]['text']);
+
+        // Verify 2D Top-Down Trajectory Map builds cleanly for the focus corner
+        $session = DrivingSession::query()->findOrFail($lastResp->json('driving_session_id'));
+        $focusCorner = collect($spa->corners)->firstWhere('turn', $plan['focus_turn']);
+        $map = $normalizer->buildCornerTrajectoryMap($ref, $drvSamples, $focusCorner);
+        $this->assertNotNull($map);
+        $this->assertGreaterThanOrEqual(4, count($map['ref_points']));
+        $this->assertGreaterThanOrEqual(4, count($map['driver_points']));
+    }
+
+    /**
+     * Build synthetic Spa telemetry with realistic 64-bit Lat/Lon heading right at Turn 5 (Les Combes, pct ~ 0.28..0.33).
+     *
+     * @return array<int, array<string, float|int>>
+     */
+    private function buildGeoTrajectorySamples(int $lapTimeMs, float $narrowEntryTurn5Meters, bool $lateThrottleTurn5): array
+    {
+        $samples = [];
+        $steps = 250;
+        $lat = 50.4372000;
+        $lon = 5.9714000;
+        $headingRad = M_PI / 2.0; // Travelling due North (+Y) approaching Les Combes
+        $stepMeters = 7004.0 / $steps;
+        $elapsedMs = 0.0;
+
+        for ($i = 0; $i < $steps; $i++) {
+            $pct = round($i / $steps, 4);
+            $speed = 70.0;
+            $throttle = 1.0;
+            $brake = 0.0;
+            $steer = 0.0;
+            $yaw = 0.0;
+
+            // Right-hand corner around Les Combes (0.270 .. 0.330)
+            if ($pct >= 0.270 && $pct <= 0.330) {
+                $speed = $narrowEntryTurn5Meters > 0 ? 33.0 : 39.0; // Slower due to narrow entry!
+                $brake = $pct <= 0.294 ? 0.85 : 0.0;
+                $fullGasPct = $lateThrottleTurn5 ? 0.318 : 0.302;
+                $throttle = $pct >= $fullGasPct ? 0.98 : 0.15;
+                $headingRad -= 0.11; // Turning clockwise (Right-hander: turn_dir = -1, inside = East/+X)
+                $steer = -0.45;
+                $yaw = -0.28;
+            }
+
+            $lat += ($stepMeters * sin($headingRad)) / 110540.0;
+            $lon += ($stepMeters * cos($headingRad)) / (111320.0 * cos(deg2rad(50.4372)));
+
+            // Apply lateral shift toward inside (+East when travelling North into a right-hander) at Turn 5 entry!
+            $sampleLon = $lon;
+            if ($narrowEntryTurn5Meters > 0 && $pct >= 0.265 && $pct <= 0.295) {
+                $sampleLon += $narrowEntryTurn5Meters / (111320.0 * cos(deg2rad(50.4372)));
+            }
+
+            $samples[] = [
+                't_ms' => (int) round($elapsedMs),
+                'pct' => $pct,
+                'speed' => $speed,
+                'throttle' => $throttle,
+                'brake' => $brake,
+                'steer' => $steer,
+                'yaw' => $yaw,
+                'lat' => round($lat, 7),
+                'lon' => round($sampleLon, 7),
+                'lap' => 1,
+                'gear' => 4,
+                'flags' => 0,
+            ];
+
+            $elapsedMs += ($stepMeters / $speed) * 1000.0;
+        }
+
+        $scale = $elapsedMs > 0 ? ($lapTimeMs / $elapsedMs) : 1.0;
+        foreach ($samples as &$s) {
+            $s['t_ms'] = (int) round($s['t_ms'] * $scale);
+        }
+
+        return $samples;
+    }
+
     /**
      * Synthesize a byte-exact binary .ibt telemetry buffer for testing IbtFileParserService.
      */

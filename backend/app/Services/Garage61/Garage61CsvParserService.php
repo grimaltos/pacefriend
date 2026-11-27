@@ -34,6 +34,10 @@ class Garage61CsvParserService
         $timeIdx = $colMap['lapcurrentlaptime'] ?? $colMap['sessiontime'] ?? $colMap['time'] ?? null;
         $trackTempIdx = $colMap['tracktempcrew'] ?? $colMap['tracktemp'] ?? $colMap['track_temp'] ?? null;
         $airTempIdx = $colMap['airtemp'] ?? $colMap['air_temp'] ?? null;
+        $latIdx = $colMap['lat'] ?? $colMap['latitude'] ?? null;
+        $lonIdx = $colMap['lon'] ?? $colMap['lng'] ?? $colMap['longitude'] ?? null;
+        $steerIdx = $colMap['steeringwheelangle'] ?? $colMap['steering_wheel_angle'] ?? $colMap['steer'] ?? null;
+        $yawIdx = $colMap['yawrate'] ?? $colMap['yaw_rate'] ?? null;
 
         if ($pctIdx === null || $speedIdx === null || $throttleIdx === null || $brakeIdx === null) {
             throw new InvalidArgumentException('El CSV de Garage 61 no incluye las columnas base requeridas (LapDistPct, Speed, Throttle, Brake).');
@@ -43,6 +47,8 @@ class Garage61CsvParserService
         $maxPctSeen = 0.0;
         $maxThrottleSeen = 0.0;
         $maxBrakeSeen = 0.0;
+        $maxSteerAbs = 0.0;
+        $maxYawAbs = 0.0;
         $detectedTrackTemp = null;
         $detectedAirTemp = null;
 
@@ -68,10 +74,20 @@ class Garage61CsvParserService
             $brake = (float) $cols[$brakeIdx];
             $gear = ($gearIdx !== null && isset($cols[$gearIdx])) ? (int) $cols[$gearIdx] : 3;
             $timeVal = ($timeIdx !== null && isset($cols[$timeIdx])) ? (float) $cols[$timeIdx] : null;
+            $latVal = ($latIdx !== null && isset($cols[$latIdx]) && is_numeric($cols[$latIdx])) ? (float) $cols[$latIdx] : null;
+            $lonVal = ($lonIdx !== null && isset($cols[$lonIdx]) && is_numeric($cols[$lonIdx])) ? (float) $cols[$lonIdx] : null;
+            $steerVal = ($steerIdx !== null && isset($cols[$steerIdx]) && is_numeric($cols[$steerIdx])) ? (float) $cols[$steerIdx] : null;
+            $yawVal = ($yawIdx !== null && isset($cols[$yawIdx]) && is_numeric($cols[$yawIdx])) ? (float) $cols[$yawIdx] : null;
 
             $maxPctSeen = max($maxPctSeen, $pct);
             $maxThrottleSeen = max($maxThrottleSeen, $throttle);
             $maxBrakeSeen = max($maxBrakeSeen, $brake);
+            if ($steerVal !== null) {
+                $maxSteerAbs = max($maxSteerAbs, abs($steerVal));
+            }
+            if ($yawVal !== null) {
+                $maxYawAbs = max($maxYawAbs, abs($yawVal));
+            }
 
             $rawRows[] = [
                 'pct' => $pct,
@@ -80,6 +96,10 @@ class Garage61CsvParserService
                 'brake' => $brake,
                 'gear' => $gear,
                 'time' => $timeVal,
+                'lat' => $latVal,
+                'lon' => $lonVal,
+                'steer' => $steerVal,
+                'yaw' => $yawVal,
             ];
         }
 
@@ -91,6 +111,8 @@ class Garage61CsvParserService
         $pctDivisor = $maxPctSeen > 1.5 ? 100.0 : 1.0;
         $throttleDivisor = $maxThrottleSeen > 1.5 ? 100.0 : 1.0;
         $brakeDivisor = $maxBrakeSeen > 1.5 ? 100.0 : 1.0;
+        $steerScale = $maxSteerAbs > 14.0 ? (M_PI / 180.0) : 1.0;
+        $yawScale = $maxYawAbs > 8.0 ? (M_PI / 180.0) : 1.0;
 
         // Downsample dense 60 Hz CSVs to ~350 points for fast JSONB storage & analysis
         $total = count($rawRows);
@@ -119,7 +141,7 @@ class Garage61CsvParserService
 
             $prevPct = $pct;
 
-            $samples[] = [
+            $sampleRow = [
                 't_ms' => $tMs,
                 'pct' => $pct,
                 'speed' => $speed,
@@ -129,6 +151,17 @@ class Garage61CsvParserService
                 'gear' => $r['gear'],
                 'flags' => 0,
             ];
+            if ($r['lat'] !== null && $r['lon'] !== null && (abs($r['lat']) > 0.001 || abs($r['lon']) > 0.001)) {
+                $sampleRow['lat'] = round($r['lat'], 7);
+                $sampleRow['lon'] = round($r['lon'], 7);
+            }
+            if ($r['steer'] !== null) {
+                $sampleRow['steer'] = round($r['steer'] * $steerScale, 4);
+            }
+            if ($r['yaw'] !== null) {
+                $sampleRow['yaw'] = round($r['yaw'] * $yawScale, 4);
+            }
+            $samples[] = $sampleRow;
         }
 
         return $samples;

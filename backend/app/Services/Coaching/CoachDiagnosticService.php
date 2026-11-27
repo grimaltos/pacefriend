@@ -18,8 +18,8 @@ class CoachDiagnosticService
 
     /**
      * Evaluate the sliding window of the user's recent clean partial/corner passes
-     * (even from laps that had an off-track in a completely different sector, or flying out-lap sectors)
-     * against the active weather-matched ReferenceLap and build a personalized CoachingPlan.
+     * against the active weather-matched ReferenceLap using a chronological causal
+     * model (Braking -> Entry Line -> Apex/Steering -> Traction/Exit Line).
      *
      * @return array{clean_laps_count: int, plan: array<string, mixed>|null}
      */
@@ -86,6 +86,7 @@ class CoachDiagnosticService
                 'focus_turn_name' => $bottleneck['name'],
                 'primary_issue' => $bottleneck['primary_issue'],
                 'avg_time_loss_ms' => $bottleneck['avg_time_loss_ms'],
+                'telemetry_breakdown' => $bottleneck['telemetry_breakdown'],
                 'triggers' => [
                     [
                         'id' => "t{$bottleneck['turn']}_pre_brake",
@@ -111,9 +112,6 @@ class CoachDiagnosticService
     }
 
     /**
-     * Aggregate per-corner clean passes independently across laps & partials, filtering
-     * traffic-slowed outliers per corner and identifying the highest-loss chronic bottleneck.
-     *
      * @param  array<int, Lap>  $recentLaps
      * @return array{0: array<string, mixed>|null, 1: int}
      */
@@ -143,7 +141,6 @@ class CoachDiagnosticService
                     continue;
                 }
 
-                // Respect per-corner Clean Entry Guard; fall back to lap->is_clean for legacy rows
                 $isCleanPass = array_key_exists('is_clean', $cm)
                     ? (bool) $cm['is_clean']
                     : (bool) $lap->is_clean;
@@ -175,7 +172,14 @@ class CoachDiagnosticService
             $earlyBrakes = [];
             $lateThrottles = [];
             $apexSpeedDeltas = [];
+            $exitSpeedDeltas = [];
             $apexBrakeExcesses = [];
+            $entryInsides = [];
+            $preApexInsides = [];
+            $apexInsides = [];
+            $exitInsides = [];
+            $understeerDegs = [];
+            $turnDir = -1;
 
             foreach ($filtered as $cm) {
                 if (! isset($cm['time_loss_ms'])) {
@@ -185,7 +189,21 @@ class CoachDiagnosticService
                 $earlyBrakes[] = (float) ($cm['early_brake_m'] ?? 0.0);
                 $lateThrottles[] = (float) ($cm['late_throttle_m'] ?? 0.0);
                 $apexSpeedDeltas[] = (float) ($cm['apex_speed_delta_kmh'] ?? 0.0);
+                $exitSpeedDeltas[] = (float) ($cm['exit_speed_delta_kmh'] ?? 0.0);
                 $apexBrakeExcesses[] = (float) ($cm['apex_brake_excess'] ?? 0.0);
+
+                if (isset($cm['turn_dir'])) {
+                    $turnDir = (int) $cm['turn_dir'];
+                }
+                if (isset($cm['entry_inside_m'], $cm['apex_inside_m'], $cm['exit_inside_m'])) {
+                    $entryInsides[] = (float) $cm['entry_inside_m'];
+                    $preApexInsides[] = (float) ($cm['pre_apex_inside_m'] ?? 0.0);
+                    $apexInsides[] = (float) $cm['apex_inside_m'];
+                    $exitInsides[] = (float) $cm['exit_inside_m'];
+                }
+                if (isset($cm['understeer_deg'])) {
+                    $understeerDegs[] = (float) $cm['understeer_deg'];
+                }
             }
 
             $lossPasses = array_filter($losses, static fn (int $ms) => $ms >= ($minLossThreshold / 2));
@@ -203,13 +221,28 @@ class CoachDiagnosticService
                 $avgEarlyBrakeM = array_sum($earlyBrakes) / count($earlyBrakes);
                 $avgLateThrottleM = array_sum($lateThrottles) / count($lateThrottles);
                 $avgApexSpeedDelta = array_sum($apexSpeedDeltas) / count($apexSpeedDeltas);
+                $avgExitSpeedDelta = array_sum($exitSpeedDeltas) / count($exitSpeedDeltas);
                 $avgApexBrakeExcess = array_sum($apexBrakeExcesses) / count($apexBrakeExcesses);
 
-                $primaryIssue = $this->classifyPrimaryIssue(
+                $hasGeo = count($entryInsides) >= max(1, intdiv($minChronicCount, 2));
+                $avgEntryInside = $hasGeo ? (array_sum($entryInsides) / count($entryInsides)) : 0.0;
+                $avgPreApexInside = $hasGeo ? (array_sum($preApexInsides) / count($preApexInsides)) : 0.0;
+                $avgApexInside = $hasGeo ? (array_sum($apexInsides) / count($apexInsides)) : 0.0;
+                $avgExitInside = $hasGeo ? (array_sum($exitInsides) / count($exitInsides)) : 0.0;
+                $avgUndersteerDeg = $understeerDegs !== [] ? (array_sum($understeerDegs) / count($understeerDegs)) : 0.0;
+
+                $primaryIssue = $this->classifyCausalRootIssue(
                     $avgEarlyBrakeM,
                     $avgApexBrakeExcess,
                     $avgApexSpeedDelta,
-                    $avgLateThrottleM
+                    $avgExitSpeedDelta,
+                    $avgLateThrottleM,
+                    $hasGeo,
+                    $avgEntryInside,
+                    $avgPreApexInside,
+                    $avgApexInside,
+                    $avgExitInside,
+                    $avgUndersteerDeg
                 );
 
                 $bestCandidate = [
@@ -217,12 +250,25 @@ class CoachDiagnosticService
                     'name' => (string) ($sample0['name'] ?? "Curva {$turn}"),
                     'brake_pct' => (float) ($sample0['brake_pct'] ?? 0.0),
                     'exit_pct' => (float) ($sample0['exit_pct'] ?? 0.0),
+                    'turn_dir' => $turnDir,
                     'avg_time_loss_ms' => $avgLoss,
                     'avg_early_brake_m' => round($avgEarlyBrakeM, 1),
                     'avg_late_throttle_m' => round($avgLateThrottleM, 1),
                     'avg_apex_speed_delta_kmh' => round($avgApexSpeedDelta, 1),
                     'avg_apex_brake_excess' => round($avgApexBrakeExcess, 3),
                     'primary_issue' => $primaryIssue,
+                    'telemetry_breakdown' => [
+                        'has_trajectory' => $hasGeo,
+                        'turn_dir' => $turnDir,
+                        'early_brake_m' => round($avgEarlyBrakeM, 1),
+                        'entry_inside_m' => round($avgEntryInside, 2),
+                        'pre_apex_inside_m' => round($avgPreApexInside, 2),
+                        'apex_inside_m' => round($avgApexInside, 2),
+                        'exit_inside_m' => round($avgExitInside, 2),
+                        'understeer_deg' => round($avgUndersteerDeg, 1),
+                        'late_throttle_m' => round($avgLateThrottleM, 1),
+                        'apex_speed_delta_kmh' => round($avgApexSpeedDelta, 1),
+                    ],
                 ];
             }
         }
@@ -231,8 +277,77 @@ class CoachDiagnosticService
     }
 
     /**
-     * Filter traffic/yellow-flag lifts on a specific corner (> 122% of median segment_time_ms).
-     *
+     * Chronological causal decision tree: evaluates Entry (Braking + Turn-in Width) ->
+     * Mid-Corner (Early/Missed Apex + Trail-Brake + Steering Scrub) -> Exit (Throttle + Track-Out)
+     * so downstream symptoms are never blamed when caused by an upstream mistake.
+     */
+    public function classifyCausalRootIssue(
+        float $earlyBrakeM,
+        float $apexBrakeExcess,
+        float $apexSpeedDeltaKmh,
+        float $exitSpeedDeltaKmh,
+        float $lateThrottleM,
+        bool $hasGeo,
+        float $entryInsideM,
+        float $preApexInsideM,
+        float $apexInsideM,
+        float $exitInsideM,
+        float $understeerDeg
+    ): string {
+        // 1. Late braking overshoots apex and compromises exit traction
+        if ($earlyBrakeM <= -7.0 && (($hasGeo && $apexInsideM <= -0.85) || $lateThrottleM >= 4.0 || $exitSpeedDeltaKmh <= -3.5)) {
+            return 'overdriving_entry';
+        }
+
+        // 2. Narrow entry (not opening up to outside kerb before turning in)
+        if ($hasGeo && $entryInsideM >= 1.15) {
+            return 'narrow_entry';
+        }
+
+        // 3. Diving inside too early (Early Apex) -> chokes exit angle & delays throttle
+        if ($hasGeo && $preApexInsideM >= 0.85 && ($lateThrottleM >= 4.5 || $exitSpeedDeltaKmh <= -2.5 || $understeerDeg >= 14.0)) {
+            return 'early_apex';
+        }
+
+        // 4. Conservative early braking
+        if ($earlyBrakeM >= 8.0) {
+            return 'early_braking';
+        }
+
+        // 5. Impatient throttle pickup while steering lock is still high -> pushes nose wide
+        if ($understeerDeg >= 18.0 && $lateThrottleM <= 3.0 && (! $hasGeo || $apexInsideM > -0.95) && ($exitSpeedDeltaKmh <= -2.0 || ($hasGeo && $exitInsideM <= -0.7))) {
+            return 'throttle_understeer';
+        }
+
+        // 6. Excessive steering wheel angle scrubbing front tyres mid-corner
+        if ($understeerDeg >= 18.0) {
+            return 'understeer_scrub';
+        }
+
+        // 7. Missing the inside apex kerb (without having braked late)
+        if ($hasGeo && $apexInsideM <= -1.05) {
+            return 'missed_apex';
+        }
+
+        // 8. Holding too much brake pressure at apex / over-slowing mid-corner
+        if ($apexBrakeExcess >= 0.08 || $apexSpeedDeltaKmh <= -5.5) {
+            return 'overslow_apex';
+        }
+
+        // 9. Pinching the exit (not unwinding steering to use full outside exit kerb)
+        if ($hasGeo && $exitInsideM >= 1.30) {
+            return 'pinched_exit';
+        }
+
+        // 10. Clean line & apex, genuine hesitation on throttle application
+        if ($lateThrottleM >= 9.0) {
+            return 'late_throttle';
+        }
+
+        return 'minimum_speed';
+    }
+
+    /**
      * @param  array<int, array<string, mixed>>  $passes
      * @return array<int, array<string, mixed>>
      */
@@ -255,30 +370,8 @@ class CoachDiagnosticService
         return array_slice($valid, 0, $windowSize);
     }
 
-    private function classifyPrimaryIssue(
-        float $earlyBrakeM,
-        float $apexBrakeExcess,
-        float $apexSpeedDeltaKmh,
-        float $lateThrottleM
-    ): string {
-        if ($earlyBrakeM >= 8.0) {
-            return 'early_braking';
-        }
-        if ($apexBrakeExcess >= 0.08 || $apexSpeedDeltaKmh <= -5.5) {
-            return 'overslow_apex';
-        }
-        if ($lateThrottleM >= 9.0) {
-            return 'late_throttle';
-        }
-        if ($earlyBrakeM <= -8.0 && $lateThrottleM >= 4.0) {
-            return 'overdriving_entry';
-        }
-
-        return 'minimum_speed';
-    }
-
     /**
-     * Translate diagnostic metrics into clear, jargon-free Spanish race engineer instructions.
+     * Translate root-cause diagnostic metrics into natural Spanish race engineer callouts.
      *
      * @param  array<string, mixed>  $b
      * @return array{0: string, 1: string}
@@ -286,9 +379,35 @@ class CoachDiagnosticService
     private function translateHabitToNaturalSpeech(string $callsign, array $b): array
     {
         $turnName = (string) $b['name'];
-        $metersBrake = max(5, min(25, (int) (round($b['avg_early_brake_m'] / 5) * 5)));
+        $metersBrake = max(5, min(25, (int) (round(abs((float) $b['avg_early_brake_m']) / 5) * 5)));
+        // If turn_dir is +1 (Left turn), outside kerb is on the RIGHT; if -1 (Right turn), outside kerb is on the LEFT!
+        $outsideSide = ((int) ($b['turn_dir'] ?? -1)) > 0 ? 'derecha' : 'izquierda';
 
         return match ($b['primary_issue']) {
+            'narrow_entry' => [
+                "{$callsign}, en {$turnName} ábrete bien a la {$outsideSide} antes de frenar para ganar ángulo.",
+                'Aprovechar todo el exterior al entrar te permite pasar con más velocidad por el vértice.',
+            ],
+            'early_apex' => [
+                "{$callsign}, en {$turnName} aguanta un punto más por fuera y retrasa el giro al vértice.",
+                'Al no tirarte tan pronto al interior, el coche ya sale encarado para abrir gas a fondo.',
+            ],
+            'missed_apex' => [
+                "{$callsign}, en {$turnName} apunta decidido al piano interior, te estás quedando abierto en el vértice.",
+                'Mantén una pizca de freno suave al girar para ceñir el morro al interior.',
+            ],
+            'pinched_exit' => [
+                "{$callsign}, prepara {$turnName} pensando en dejar correr el coche libre a la salida.",
+                "Abre manos antes al salir y usa todo el piano exterior de la {$outsideSide}.",
+            ],
+            'throttle_understeer' => [
+                "{$callsign}, en {$turnName} ten paciencia con el gas hasta que el coche termine de rotar.",
+                'Espera una décima en el vértice antes de acelerar para no empujar el morro hacia fuera.',
+            ],
+            'understeer_scrub' => [
+                "{$callsign}, en {$turnName} suaviza el giro de volante, estás arrastrando las ruedas delanteras.",
+                'Menos ángulo de dirección en el apoyo, deja que el freno regresivo ayude a girar.',
+            ],
             'early_braking' => [
                 "{$callsign}, en {$turnName} aguanta la referencia y retrasa unos {$metersBrake} metros la frenada.",
                 'Confía en la entrada y deja correr el coche limpio hasta el vértice.',
@@ -298,12 +417,12 @@ class CoachDiagnosticService
                 'Menos freno en el vértice, deja que el coche rote con más paso por curva.',
             ],
             'late_throttle' => [
-                "{$callsign}, prepara la rotación pronto en {$turnName} para poder abrir gas antes.",
-                'Endereza volante en cuanto pises el vértice y aplica acelerador decidido.',
+                "{$callsign}, tienes buena línea en {$turnName}, confía para abrir acelerador antes.",
+                'Endereza volante desde el vértice y aplica gas decidido sin dudar.',
             ],
             'overdriving_entry' => [
-                "{$callsign}, en {$turnName} frena cinco metros antes para no pasarte del vértice.",
-                'Sacrifica un punto la entrada para salir traccionando mucho antes a la recta.',
+                "{$callsign}, en {$turnName} frena {$metersBrake} metros antes para no colarte del vértice.",
+                'Sacrifica un punto la entrada para tocar el piano interior y salir traccionando antes.',
             ],
             default => [
                 "{$callsign}, busca más velocidad de paso en {$turnName} suavizando las manos al girar.",

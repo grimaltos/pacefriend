@@ -164,7 +164,7 @@ class IbtFileParserService
             }
 
             $relMs = (int) round(max(0.0, $sessionTime - $laps[$lapNum]['start_time']) * 1000.0);
-            $laps[$lapNum]['samples'][] = [
+            $sampleItem = [
                 't_ms' => $relMs,
                 'pct' => round($pct, 4),
                 'speed' => round((float) $this->readScalar($bytes, $rowOffset, $vars['Speed']), 2),
@@ -174,6 +174,21 @@ class IbtFileParserService
                 'gear' => isset($vars['Gear']) ? (int) $this->readScalar($bytes, $rowOffset, $vars['Gear']) : 3,
                 'flags' => 0,
             ];
+            if (isset($vars['Lat'], $vars['Lon'])) {
+                $latV = (float) $this->readScalar($bytes, $rowOffset, $vars['Lat']);
+                $lonV = (float) $this->readScalar($bytes, $rowOffset, $vars['Lon']);
+                if (abs($latV) > 0.001 || abs($lonV) > 0.001) {
+                    $sampleItem['lat'] = round($latV, 7);
+                    $sampleItem['lon'] = round($lonV, 7);
+                }
+            }
+            if (isset($vars['SteeringWheelAngle'])) {
+                $sampleItem['steer'] = round((float) $this->readScalar($bytes, $rowOffset, $vars['SteeringWheelAngle']), 4);
+            }
+            if (isset($vars['YawRate'])) {
+                $sampleItem['yaw'] = round((float) $this->readScalar($bytes, $rowOffset, $vars['YawRate']), 4);
+            }
+            $laps[$lapNum]['samples'][] = $sampleItem;
         }
 
         // Select fastest complete clean lap (covering at least 0.03 -> 0.97)

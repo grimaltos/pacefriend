@@ -162,11 +162,23 @@ class ProSessionReportService
                     'early_brakes' => [],
                     'late_throttles' => [],
                     'apex_deltas' => [],
+                    'entry_insides' => [],
+                    'apex_insides' => [],
+                    'exit_insides' => [],
+                    'understeers' => [],
                 ];
                 $byTurn[$turn]['losses'][] = (int) $cm['time_loss_ms'];
                 $byTurn[$turn]['early_brakes'][] = (float) ($cm['early_brake_m'] ?? 0.0);
                 $byTurn[$turn]['late_throttles'][] = (float) ($cm['late_throttle_m'] ?? 0.0);
                 $byTurn[$turn]['apex_deltas'][] = (float) ($cm['apex_speed_delta_kmh'] ?? 0.0);
+                if (isset($cm['entry_inside_m'], $cm['apex_inside_m'], $cm['exit_inside_m'])) {
+                    $byTurn[$turn]['entry_insides'][] = (float) $cm['entry_inside_m'];
+                    $byTurn[$turn]['apex_insides'][] = (float) $cm['apex_inside_m'];
+                    $byTurn[$turn]['exit_insides'][] = (float) $cm['exit_inside_m'];
+                }
+                if (isset($cm['understeer_deg'])) {
+                    $byTurn[$turn]['understeers'][] = (float) $cm['understeer_deg'];
+                }
             }
         }
 
@@ -179,6 +191,10 @@ class ProSessionReportService
             $earlyBrake = round(array_sum($item['early_brakes']) / count($item['early_brakes']), 1);
             $lateThrottle = round(array_sum($item['late_throttles']) / count($item['late_throttles']), 1);
             $apexDelta = round(array_sum($item['apex_deltas']) / count($item['apex_deltas']), 1);
+            $entryInside = $item['entry_insides'] !== [] ? round(array_sum($item['entry_insides']) / count($item['entry_insides']), 2) : null;
+            $apexInside = $item['apex_insides'] !== [] ? round(array_sum($item['apex_insides']) / count($item['apex_insides']), 2) : null;
+            $exitInside = $item['exit_insides'] !== [] ? round(array_sum($item['exit_insides']) / count($item['exit_insides']), 2) : null;
+            $understeer = $item['understeers'] !== [] ? round(array_sum($item['understeers']) / count($item['understeers']), 1) : 0.0;
 
             $priorities[] = [
                 'turn' => $item['turn'],
@@ -187,7 +203,11 @@ class ProSessionReportService
                 'early_brake_m' => $earlyBrake,
                 'late_throttle_m' => $lateThrottle,
                 'apex_speed_delta_kmh' => $apexDelta,
-                'clear_advice' => $this->explainCornerPlainly($item['name'], $earlyBrake, $apexDelta, $lateThrottle),
+                'entry_inside_m' => $entryInside,
+                'apex_inside_m' => $apexInside,
+                'exit_inside_m' => $exitInside,
+                'understeer_deg' => $understeer,
+                'clear_advice' => $this->explainCornerPlainly($item['name'], $earlyBrake, $apexDelta, $lateThrottle, $entryInside, $apexInside, $exitInside, $understeer),
             ];
         }
 
@@ -196,11 +216,36 @@ class ProSessionReportService
         return array_slice($priorities, 0, 3);
     }
 
-    private function explainCornerPlainly(string $name, float $earlyBrakeM, float $apexDeltaKmh, float $lateThrottleM): string
-    {
+    private function explainCornerPlainly(
+        string $name,
+        float $earlyBrakeM,
+        float $apexDeltaKmh,
+        float $lateThrottleM,
+        ?float $entryInsideM = null,
+        ?float $apexInsideM = null,
+        ?float $exitInsideM = null,
+        float $understeerDeg = 0.0
+    ): string {
+        if ($earlyBrakeM <= -7.0 && (($apexInsideM !== null && $apexInsideM <= -0.85) || $lateThrottleM >= 4.0)) {
+            $m = (int) round(abs($earlyBrakeM));
+            return "Causa raíz en frenada: retrasas {$m} m de más el punto de frenada en {$name}, lo que te hace pasarte del vértice y retrasar la tracción. Frena un punto antes para ceñir el morro.";
+        }
+        if ($entryInsideM !== null && $entryInsideM >= 1.15) {
+            return "Causa raíz en trazada de entrada: entras {$entryInsideM} m más cerrado que la referencia en {$name}. Ábrete al piano exterior antes de girar para ganar radio de curva.";
+        }
         if ($earlyBrakeM >= 8.0) {
             $m = (int) round($earlyBrakeM);
             return "Estás iniciando la frenada unos {$m} m antes que la referencia de igual temperatura. Mantén el gas a fondo un instante más y ataca el pedal con decisión inicial.";
+        }
+        if ($understeerDeg >= 18.0) {
+            return "Exceso de volante (+{$understeerDeg}° extra respecto a la rotación conseguida) en {$name}: estás arrastrando el neumático delantero. Suaviza manos y apóyate en el freno regresivo.";
+        }
+        if ($apexInsideM !== null && $apexInsideM <= -1.05) {
+            $miss = abs($apexInsideM);
+            return "Pierdes el vértice de {$name} por {$miss} m hacia el exterior. Mantén un hilo de freno suave hasta apuntar al piano interior.";
+        }
+        if ($exitInsideM !== null && $exitInsideM >= 1.30) {
+            return "Salida ahogada en {$name}: te dejas {$exitInsideM} m de pista exterior sin usar. Abre dirección antes desde el vértice para no frenar el coche con las manos.";
         }
         if ($apexDeltaKmh <= -5.0) {
             $kmh = abs(round($apexDeltaKmh));
@@ -208,7 +253,7 @@ class ProSessionReportService
         }
         if ($lateThrottleM >= 8.0) {
             $m = (int) round($lateThrottleM);
-            return "Retrasas {$m} m la apertura total del acelerador al salir de {$name}. Busca rotar el coche un poco antes en el vértice para abrir dirección y acelerar recto.";
+            return "Retrasas {$m} m la apertura total del acelerador al salir de {$name}. Con el coche ya rotado en el vértice, confía y aplica gas antes.";
         }
 
         return "Suaviza la transición entre soltar freno y dar el primer toque de acelerador para mantener asentada la plataforma aerodinámica en {$name}.";

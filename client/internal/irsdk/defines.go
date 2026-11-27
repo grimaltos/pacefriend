@@ -160,6 +160,12 @@ type VarIndex struct {
 	LapDistPct varSlot
 	Gear       varSlot
 
+	// Racing line & chassis rotation channels (64-bit world Lat/Lon + steering/yaw)
+	Lat                varSlot
+	Lon                varSlot
+	SteeringWheelAngle varSlot
+	YawRate            varSlot
+
 	// Optional enrichment variables for exact lap timing, cleanliness & weather matching
 	SessionTime              varSlot
 	LapLastLapTime           varSlot
@@ -232,6 +238,14 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.LapDistPct = slot
 		case "Gear":
 			idx.Gear = slot
+		case "Lat":
+			idx.Lat = slot
+		case "Lon":
+			idx.Lon = slot
+		case "SteeringWheelAngle":
+			idx.SteeringWheelAngle = slot
+		case "YawRate":
+			idx.YawRate = slot
 		case "SessionTime":
 			idx.SessionTime = slot
 		case "LapLastLapTime":
@@ -365,6 +379,24 @@ func ReadFrameFromMemory(mem []byte, idx *VarIndex, out *telemetry.RawFrame) (bo
 		out.Sample.Lap = readInt32(row, idx.Lap)
 		out.Sample.LapDistPct = readFloat32(row, idx.LapDistPct)
 		out.Sample.Gear = int16(readInt32(row, idx.Gear))
+
+		if idx.Lat.present && idx.Lon.present {
+			out.Sample.Lat = readFloat64(row, idx.Lat)
+			out.Sample.Lon = readFloat64(row, idx.Lon)
+		} else {
+			out.Sample.Lat = 0
+			out.Sample.Lon = 0
+		}
+		if idx.SteeringWheelAngle.present {
+			out.Sample.Steer = readFloat32(row, idx.SteeringWheelAngle)
+		} else {
+			out.Sample.Steer = 0
+		}
+		if idx.YawRate.present {
+			out.Sample.YawRate = readFloat32(row, idx.YawRate)
+		} else {
+			out.Sample.YawRate = 0
+		}
 
 		var flags telemetry.SampleFlags
 		if idx.PlayerTrackSurface.present && readInt32(row, idx.PlayerTrackSurface) == TrackSurfaceOff {

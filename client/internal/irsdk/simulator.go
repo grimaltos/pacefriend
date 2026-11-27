@@ -184,6 +184,13 @@ func (s *SimulatorSource) advancePhysics(dt float64) {
 	fuelL := float32(math.Max(2.0, 48.0-(float64(s.lap)+float64(pct))*2.8))
 	binary.LittleEndian.PutUint32(row[60:64], math.Float32bits(fuelL)) // FuelLevel (L)
 	row[64] = 1                                                        // IsOnTrack = true
+	angle := float64(pct) * 2.0 * math.Pi
+	simLat := 50.4372 + 0.006*math.Sin(angle)
+	simLon := 5.9714 + 0.009*math.Cos(angle)
+	binary.LittleEndian.PutUint64(row[72:80], math.Float64bits(simLat))
+	binary.LittleEndian.PutUint64(row[80:88], math.Float64bits(simLon))
+	binary.LittleEndian.PutUint32(row[88:92], math.Float32bits(-0.35*brake)) // SteeringWheelAngle (rad)
+	binary.LittleEndian.PutUint32(row[92:96], math.Float32bits(-0.22*brake)) // YawRate (rad/s)
 
 	// Publish updated tickCount for this buffer slot
 	binary.LittleEndian.PutUint32(s.mem[hdrVarBufBase:hdrVarBufBase+4], uint32(s.tickCount))
@@ -245,7 +252,7 @@ func gearForSpeed(speedMS float32, minGear int32) int32 {
 	return g
 }
 
-const simRowBufLen = 80
+const simRowBufLen = 96
 
 type simVarDef struct {
 	name    string
@@ -270,6 +277,10 @@ var simVars = []simVarDef{
 	{name: "TrackWetness", varType: VarTypeInt, offset: 56},
 	{name: "FuelLevel", varType: VarTypeFloat, offset: 60},
 	{name: "IsOnTrack", varType: VarTypeBool, offset: 64},
+	{name: "Lat", varType: VarTypeDouble, offset: 72},
+	{name: "Lon", varType: VarTypeDouble, offset: 80},
+	{name: "SteeringWheelAngle", varType: VarTypeFloat, offset: 88},
+	{name: "YawRate", varType: VarTypeFloat, offset: 92},
 }
 
 func buildSyntheticShmBlock(yamlText string) []byte {

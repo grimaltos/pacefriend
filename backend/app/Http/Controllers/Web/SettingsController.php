@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
 use App\Services\Garage61\Garage61ClientService;
+use App\Services\Garage61\Garage61OAuthService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -12,15 +13,20 @@ use RuntimeException;
 
 class SettingsController extends Controller
 {
-    public function edit(Request $request, Garage61ClientService $g61Client): Response
-    {
+    public function edit(
+        Request $request,
+        Garage61ClientService $g61Client,
+        Garage61OAuthService $g61OAuth
+    ): Response {
         $user = $request->user();
         $g61Status = null;
 
         if (filled($user->garage61_token)) {
             try {
-                $me = $g61Client->me((string) $user->garage61_token);
+                $validToken = $g61OAuth->resolveValidAccessToken($user);
+                $me = $g61Client->me($validToken);
                 $g61Status = [
+                    'auth_type' => $user->garage61_auth_type ?: 'pat',
                     'driver' => trim(($me['firstName'] ?? '').' '.($me['lastName'] ?? '')) ?: ($me['slug'] ?? ''),
                     'plan' => $me['subscriptionPlan'] ?? 'free',
                     'permissions' => $me['apiPermissions'] ?? [],
@@ -40,6 +46,9 @@ class SettingsController extends Controller
                 'callsign_phonetic' => $user->callsign_phonetic,
                 'preferences' => $user->preferences ?? [],
                 'garage61_connected' => filled($user->garage61_token),
+                'garage61_auth_type' => $user->garage61_auth_type ?: 'pat',
+                'garage61_oauth_available' => $g61OAuth->isConfigured(),
+                'garage61_callback_url' => $g61OAuth->redirectUri(),
                 'garage61_status' => $g61Status,
                 'autopilot_enabled' => (bool) $user->autopilot_enabled,
                 'autopilot_mode' => $user->autopilot_mode ?: 'progressive',
@@ -70,6 +79,30 @@ class SettingsController extends Controller
         return back()->with('success', "Perfil actualizado. El ingeniero te llamará \"{$user->effectiveCallsign()}\".");
     }
 
+    public function redirectToGarage61(Request $request, Garage61OAuthService $g61OAuth): RedirectResponse
+    {
+        try {
+            $authUrl = $g61OAuth->createAuthorizationUrl($request);
+        } catch (RuntimeException $e) {
+            return redirect('/settings')->with('error', $e->getMessage());
+        }
+
+        return redirect()->away($authUrl);
+    }
+
+    public function handleGarage61Callback(Request $request, Garage61OAuthService $g61OAuth): RedirectResponse
+    {
+        try {
+            $me = $g61OAuth->handleCallback($request, $request->user());
+        } catch (RuntimeException $e) {
+            return redirect('/settings')->with('error', $e->getMessage());
+        }
+
+        $driver = trim(($me['firstName'] ?? '').' '.($me['lastName'] ?? '')) ?: ($me['slug'] ?? 'conectada');
+
+        return redirect('/settings')->with('success', "¡Cuenta de Garage 61 ({$driver}) vinculada automáticamente por OAuth2!");
+    }
+
     public function updateGarage61(Request $request, Garage61ClientService $g61Client): RedirectResponse
     {
         $validated = $request->validate([
@@ -89,6 +122,9 @@ class SettingsController extends Controller
 
         if (! empty($validated['clear_token'])) {
             $updates['garage61_token'] = null;
+            $updates['garage61_auth_type'] = null;
+            $updates['garage61_refresh_token'] = null;
+            $updates['garage61_token_expires_at'] = null;
         } elseif (! empty($validated['garage61_token'])) {
             try {
                 $profile = $g61Client->me($validated['garage61_token']);
@@ -96,6 +132,9 @@ class SettingsController extends Controller
                 return back()->withErrors(['garage61_token' => $e->getMessage()]);
             }
             $updates['garage61_token'] = trim($validated['garage61_token']);
+            $updates['garage61_auth_type'] = 'pat';
+            $updates['garage61_refresh_token'] = null;
+            $updates['garage61_token_expires_at'] = null;
             $g61Nick = trim(($profile['firstName'] ?? '').' '.($profile['lastName'] ?? '')) ?: ($profile['nickName'] ?? 'conectada');
         }
 

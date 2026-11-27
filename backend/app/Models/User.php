@@ -20,12 +20,15 @@ use Laravel\Sanctum\HasApiTokens;
     'password',
     'preferences',
     'garage61_token',
+    'garage61_auth_type',
+    'garage61_refresh_token',
+    'garage61_token_expires_at',
     'autopilot_enabled',
     'autopilot_mode',
     'autopilot_delta_ms',
     'last_client_seen_at',
 ])]
-#[Hidden(['password', 'remember_token', 'garage61_token'])]
+#[Hidden(['password', 'remember_token', 'garage61_token', 'garage61_refresh_token'])]
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
@@ -36,9 +39,11 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'last_client_seen_at' => 'datetime',
+            'garage61_token_expires_at' => 'datetime',
             'password' => 'hashed',
             'preferences' => 'array',
             'garage61_token' => 'encrypted',
+            'garage61_refresh_token' => 'encrypted',
             'autopilot_enabled' => 'boolean',
             'autopilot_delta_ms' => 'integer',
         ];

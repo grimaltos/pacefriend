@@ -15,6 +15,7 @@ class Garage61ImporterService
 {
     public function __construct(
         private readonly Garage61ClientService $client,
+        private readonly Garage61OAuthService $oauth,
         private readonly Garage61CsvParserService $csvParser,
         private readonly TelemetryNormalizerService $normalizer,
     ) {}
@@ -216,7 +217,7 @@ class Garage61ImporterService
         }
 
         try {
-            $token = (string) $user->garage61_token;
+            $token = $this->oauth->resolveValidAccessToken($user);
             $ids = $this->client->resolveTrackAndCarIds($token, $session->track, $session->car_name);
             if ($ids['track_id'] === null) {
                 return null;
@@ -395,11 +396,6 @@ class Garage61ImporterService
 
     private function requireUserToken(User $user): string
     {
-        $token = trim((string) $user->garage61_token);
-        if ($token === '') {
-            throw new RuntimeException('Conecta primero tu Personal Access Token de Garage 61 en Ajustes de Piloto.');
-        }
-
-        return $token;
+        return $this->oauth->resolveValidAccessToken($user);
     }
 }

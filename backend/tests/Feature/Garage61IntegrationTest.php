@@ -255,6 +255,72 @@ class Garage61IntegrationTest extends TestCase
         $this->assertNotEmpty($ref->corner_baselines);
     }
 
+    public function test_oauth2_authorization_callback_and_transparent_token_refresh(): void
+    {
+        config([
+            'pacefriend.garage61.oauth.client_id' => 'pf_client_123',
+            'pacefriend.garage61.oauth.client_secret' => 'pf_secret_456',
+            'pacefriend.garage61.oauth.redirect_uri' => 'https://pacefriend.grimaltos.com/settings/garage61/callback',
+        ]);
+
+        Http::fake([
+            'https://garage61.net/api/oauth/token' => function ($request) {
+                $body = $request->data();
+                if (($body['grant_type'] ?? '') === 'refresh_token') {
+                    return Http::response([
+                        'access_token' => 'oauth_refreshed_access_999',
+                        'refresh_token' => 'oauth_refresh_999',
+                        'expires_in' => 3600,
+                    ], 200);
+                }
+
+                return Http::response([
+                    'access_token' => 'oauth_initial_access_111',
+                    'refresh_token' => 'oauth_refresh_111',
+                    'expires_in' => 3600,
+                ], 200);
+            },
+            'https://garage61.net/api/v1/me' => Http::response([
+                'id' => 'u_vicent',
+                'slug' => 'vicent-grimaltos',
+                'firstName' => 'Vicent',
+                'lastName' => 'Grimaltos',
+                'subscriptionPlan' => 'pro',
+                'apiPermissions' => ['driving_data', 'analyses'],
+                'teams' => [['id' => 't1', 'name' => 'F·R·I·E·N·D·S', 'slug' => 'friends', 'isOwner' => true]],
+            ], 200),
+        ]);
+
+        $user = User::factory()->create();
+
+        // 1. Initiate OAuth2 redirect
+        $redirectResp = $this->actingAs($user)->get('/settings/garage61/redirect');
+        $redirectResp->assertRedirect();
+        $location = (string) $redirectResp->headers->get('Location');
+        $this->assertStringStartsWith('https://garage61.net/app/account/oauth?', $location);
+        $this->assertStringContainsString('code_challenge_method=S256', $location);
+
+        parse_str((string) parse_url($location, PHP_URL_QUERY), $authParams);
+        $state = $authParams['state'] ?? '';
+        $this->assertNotEmpty($state);
+
+        // 2. Simulate Garage 61 callback with authorization code
+        $callbackResp = $this->actingAs($user)->get("/settings/garage61/callback?code=auth_code_xyz&state={$state}");
+        $callbackResp->assertRedirect('/settings');
+
+        $user->refresh();
+        $this->assertSame('oauth', $user->garage61_auth_type);
+        $this->assertSame('oauth_initial_access_111', $user->garage61_token);
+        $this->assertSame('oauth_refresh_111', $user->garage61_refresh_token);
+
+        // 3. Simulate token expiration and verify transparent auto-refresh
+        $user->update(['garage61_token_expires_at' => now()->subMinutes(5)]);
+        $oauthService = app(\App\Services\Garage61\Garage61OAuthService::class);
+        $freshToken = $oauthService->resolveValidAccessToken($user->fresh());
+
+        $this->assertSame('oauth_refreshed_access_999', $freshToken);
+    }
+
     private function buildSyntheticG61Csv(): string
     {
         $rows = ['LapDistPct,Speed,Throttle,Brake,Gear,LapCurrentLapTime'];

@@ -68,5 +68,13 @@ return [
         'progressive_min_faster_ms' => 600,
         'progressive_max_faster_ms' => 1600,
         'level_up_threshold_ms' => 250,
+        'oauth' => [
+            'client_id' => env('GARAGE61_CLIENT_ID'),
+            'client_secret' => env('GARAGE61_CLIENT_SECRET'),
+            'redirect_uri' => env('GARAGE61_REDIRECT_URI'),
+            'authorize_url' => env('GARAGE61_AUTHORIZE_URL', 'https://garage61.net/app/account/oauth'),
+            'token_url' => env('GARAGE61_TOKEN_URL', 'https://garage61.net/api/oauth/token'),
+            'scopes' => env('GARAGE61_OAUTH_SCOPES', 'driving_data analyses'),
+        ],
     ],
 ];

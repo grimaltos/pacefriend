@@ -40,6 +40,8 @@ Route::middleware('auth')->group(function () {
 
     Route::get('/settings', [SettingsController::class, 'edit'])->name('settings.edit');
     Route::put('/settings/profile', [SettingsController::class, 'updateProfile'])->name('settings.profile.update');
+    Route::get('/settings/garage61/redirect', [SettingsController::class, 'redirectToGarage61'])->name('settings.garage61.redirect');
+    Route::get('/settings/garage61/callback', [SettingsController::class, 'handleGarage61Callback'])->name('settings.garage61.callback');
     Route::put('/settings/garage61', [SettingsController::class, 'updateGarage61'])->name('settings.garage61.update');
     Route::post('/settings/tokens', [SettingsController::class, 'createToken'])->name('settings.tokens.create');
     Route::delete('/settings/tokens/{tokenId}', [SettingsController::class, 'revokeToken'])->name('settings.tokens.revoke');

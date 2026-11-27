@@ -109,12 +109,26 @@ function revoke(id) {
                 <div class="flex items-center justify-between mb-1">
                     <h2 class="text-lg font-semibold text-white">Garage 61 &amp; Autopilot Progresivo</h2>
                     <span :class="profile.garage61_connected ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'" class="text-[11px] px-2.5 py-0.5 rounded-full border font-medium">
-                        {{ profile.garage61_connected ? 'Token Conectado' : 'Sin Conectar' }}
+                        {{ profile.garage61_connected ? (profile.garage61_auth_type === 'oauth' ? 'Conectado vía OAuth2' : 'Token Personal Conectado') : 'Sin Conectar' }}
                     </span>
                 </div>
                 <p class="text-xs text-zinc-400 mb-4">
-                    Conecta tu Personal Access Token de <code class="text-zinc-200">garage61.net/developer</code> para importar análisis/vueltas o activar el Autopilot térmico en pista.
+                    Vincula tu cuenta en 1 clic con OAuth2 (ideal para ti y tus compañeros de equipo) o usa un Personal Access Token manual.
                 </p>
+
+                <!-- 1-Click OAuth2 Button -->
+                <div class="mb-4">
+                    <a
+                        v-if="profile.garage61_oauth_available"
+                        href="/settings/garage61/redirect"
+                        class="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-sm transition"
+                    >
+                        <span>{{ profile.garage61_connected && profile.garage61_auth_type === 'oauth' ? 'Reconectar cuenta de Garage 61 (OAuth2)' : 'Conectar mi cuenta de Garage 61 (1 Clic)' }}</span>
+                    </a>
+                    <div v-else class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3.5 py-2.5 text-[11px] text-zinc-400">
+                        Botón OAuth2 listo: se activará automáticamente en cuanto añadas <code class="text-zinc-200">GARAGE61_CLIENT_ID</code> y <code class="text-zinc-200">GARAGE61_CLIENT_SECRET</code> en el <code class="text-zinc-200">.env</code> (Callback: <code class="text-emerald-400">{{ profile.garage61_callback_url }}</code>).
+                    </div>
+                </div>
 
                 <div v-if="profile.garage61_status" class="mb-4 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 text-xs space-y-1">
                     <div v-if="profile.garage61_status.error" class="text-rose-400">{{ profile.garage61_status.error }}</div>

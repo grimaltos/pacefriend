@@ -9,6 +9,7 @@ use App\Models\Track;
 use App\Services\Garage61\Garage61ClientService;
 use App\Services\Garage61\Garage61CsvParserService;
 use App\Services\Garage61\Garage61ImporterService;
+use App\Services\Garage61\Garage61OAuthService;
 use App\Services\Telemetry\IbtFileParserService;
 use App\Services\Telemetry\TelemetryNormalizerService;
 use Illuminate\Http\JsonResponse;
@@ -25,6 +26,7 @@ class ReferenceLapController extends Controller
         private readonly IbtFileParserService $ibtParser,
         private readonly Garage61CsvParserService $g61CsvParser,
         private readonly Garage61ClientService $g61Client,
+        private readonly Garage61OAuthService $g61OAuth,
         private readonly TelemetryNormalizerService $normalizer,
         private readonly Garage61ImporterService $g61Importer,
     ) {}
@@ -63,7 +65,7 @@ class ReferenceLapController extends Controller
 
         if (filled($user->garage61_token)) {
             try {
-                $token = (string) $user->garage61_token;
+                $token = $this->g61OAuth->resolveValidAccessToken($user);
                 $g61Tracks = array_map(static fn (array $t) => [
                     'id' => $t['id'],
                     'label' => trim(($t['name'] ?? '').(! empty($t['variant']) ? ' — '.$t['variant'] : '')),

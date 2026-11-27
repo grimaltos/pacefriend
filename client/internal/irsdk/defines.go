@@ -23,6 +23,7 @@ const (
 	StatusConnected   = 0x00000001
 	TrackSurfaceOff   = 0
 	MaxTornReadChecks = 3
+	GravityMS2        = 9.80665
 )
 
 // Shared memory mapping names on Windows.
@@ -165,6 +166,8 @@ type VarIndex struct {
 	Lon                varSlot
 	SteeringWheelAngle varSlot
 	YawRate            varSlot
+	LatAccel           varSlot
+	LongAccel          varSlot
 	BrakeABSactive     varSlot
 	TireLFRumblePitch  varSlot
 	TireRFRumblePitch  varSlot
@@ -249,6 +252,10 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.SteeringWheelAngle = slot
 		case "YawRate":
 			idx.YawRate = slot
+		case "LatAccel":
+			idx.LatAccel = slot
+		case "LongAccel":
+			idx.LongAccel = slot
 		case "BrakeABSactive":
 			idx.BrakeABSactive = slot
 		case "TireLF_RumblePitch":
@@ -405,6 +412,16 @@ func ReadFrameFromMemory(mem []byte, idx *VarIndex, out *telemetry.RawFrame) (bo
 			out.Sample.YawRate = readFloat32(row, idx.YawRate)
 		} else {
 			out.Sample.YawRate = 0
+		}
+		if idx.LatAccel.present {
+			out.Sample.LatG = readFloat32(row, idx.LatAccel) / GravityMS2
+		} else {
+			out.Sample.LatG = 0
+		}
+		if idx.LongAccel.present {
+			out.Sample.LongG = readFloat32(row, idx.LongAccel) / GravityMS2
+		} else {
+			out.Sample.LongG = 0
 		}
 
 		var flags telemetry.SampleFlags

@@ -14,6 +14,7 @@ class CoachDiagnosticService
     public function __construct(
         private readonly TelemetryNormalizerService $normalizer,
         private readonly VoiceSynthesisManager $voiceManager,
+        private readonly CommunityKnowledgeService $communityKnowledge,
     ) {}
 
     /**
@@ -58,6 +59,7 @@ class CoachDiagnosticService
         [$bottleneck, $maxCleanPasses] = $this->detectChronicBottleneck(
             $recentLaps,
             $track,
+            $carName,
             $referenceLap,
             $windowSize,
             $minPasses
@@ -131,13 +133,20 @@ class CoachDiagnosticService
     private function detectChronicBottleneck(
         array $recentLaps,
         Track $track,
+        string $carName,
         ?ReferenceLap $referenceLap,
         int $windowSize,
         int $minChronicCount
     ): array {
-        // Collect raw clean passes per turn first so we can synthesize a Self-Best Corner Baseline when $referenceLap === null
+        // Collect raw clean passes per turn & discover peak session lateral G for Friction Circle check
         $rawCleanByTurn = [];
+        $sessionPeakLatG = 0.0;
+        $lastTrackTemp = 25.0;
+        $lastIsWet = false;
+
         foreach ($recentLaps as $lap) {
+            $lastTrackTemp = $lap->track_temp_c ?: $lastTrackTemp;
+            $lastIsWet = (bool) $lap->is_wet;
             foreach (($lap->corner_metrics ?? []) as $cm) {
                 $turn = (int) ($cm['turn'] ?? 0);
                 if ($turn <= 0) {
@@ -146,9 +155,15 @@ class CoachDiagnosticService
                 $isCleanPass = array_key_exists('is_clean', $cm) ? (bool) $cm['is_clean'] : (bool) $lap->is_clean;
                 if ($isCleanPass) {
                     $rawCleanByTurn[$turn][] = $cm;
+                    if (isset($cm['peak_lat_g']) && (float) $cm['peak_lat_g'] > $sessionPeakLatG) {
+                        $sessionPeakLatG = (float) $cm['peak_lat_g'];
+                    }
                 }
             }
         }
+
+        $learnedGrip = $this->communityKnowledge->resolveCarGripCeiling($carName, $lastIsWet, $lastTrackTemp);
+        $ceilingLatG = max($sessionPeakLatG, (float) ($learnedGrip['lat_g'] ?? 0.0));
 
         $refCorners = $referenceLap !== null
             ? ($referenceLap->corner_baselines ?? [])
@@ -202,6 +217,7 @@ class CoachDiagnosticService
             $steerRates = [];
             $steerJerks = [];
             $gearDeltas = [];
+            $peakLatGs = [];
             $missedCurbs = 0;
             $targetGear = null;
             $turnDir = -1;
@@ -222,6 +238,9 @@ class CoachDiagnosticService
                 $steerRates[] = (float) ($cm['max_steer_rate_degs'] ?? 0.0);
                 $steerJerks[] = (float) ($cm['steer_jerk_excess_degs'] ?? 0.0);
                 $gearDeltas[] = (int) ($cm['gear_delta'] ?? 0);
+                if (isset($cm['peak_lat_g']) && (float) $cm['peak_lat_g'] > 0.2) {
+                    $peakLatGs[] = (float) $cm['peak_lat_g'];
+                }
 
                 if (! empty($cm['missed_curb'])) {
                     $missedCurbs++;
@@ -250,15 +269,18 @@ class CoachDiagnosticService
             $avgCoastingMs = (int) round(array_sum($coastingMsList) / $nEval);
             $avgSteerRate = array_sum($steerRates) / $nEval;
             $avgUndersteerDeg = $understeerDegs !== [] ? (array_sum($understeerDegs) / count($understeerDegs)) : 0.0;
+            $avgPeakLatG = $peakLatGs !== [] ? (array_sum($peakLatGs) / count($peakLatGs)) : 0.0;
 
             $requiredLossPasses = $referenceLap !== null ? $minChronicCount : max(1, $minChronicCount - 1);
             $lossPasses = array_filter($losses, static fn (int $ms) => $ms >= ($minLossThreshold / 2));
             $avgLoss = $losses !== [] ? (int) round(array_sum($losses) / count($losses)) : 0;
 
-            // Intrinsic Vehicle Physics check (catches ABS abuse, heavy scrub, coasting, or steering snap even with 0ms self-delta!)
+            // Intrinsic Vehicle Physics & Friction Circle (Grip Circle) check:
+            // Runs when no external reference exists OR when matched reference is driver's own auto-PB!
+            $canUseIntrinsicPhysics = $referenceLap === null || $referenceLap->source === 'personal_auto';
             $intrinsicIssue = null;
             $intrinsicEstimatedLossMs = 0;
-            if ($referenceLap === null && ($avgLoss < $minLossThreshold || count($lossPasses) < $requiredLossPasses)) {
+            if ($canUseIntrinsicPhysics && ($avgLoss < $minLossThreshold || count($lossPasses) < $requiredLossPasses)) {
                 if ($avgAbsRatio >= 0.48) {
                     $intrinsicIssue = 'abs_abuse';
                     $intrinsicEstimatedLossMs = 140;
@@ -271,6 +293,9 @@ class CoachDiagnosticService
                 } elseif ($avgCoastingMs >= 430) {
                     $intrinsicIssue = 'abrupt_brake_release';
                     $intrinsicEstimatedLossMs = 115;
+                } elseif ($ceilingLatG >= 1.25 && $avgPeakLatG >= 0.45 && $avgPeakLatG <= ($ceilingLatG * 0.72) && $avgUndersteerDeg < 10.0 && $avgAbsRatio < 0.25) {
+                    $intrinsicIssue = 'under_driving_grip';
+                    $intrinsicEstimatedLossMs = (int) round(($ceilingLatG - $avgPeakLatG) * 180);
                 }
             }
 
@@ -581,6 +606,10 @@ class CoachDiagnosticService
             'understeer_scrub' => [
                 "{$callsign}, {$turnName}: menos volante en apoyo, arrastras morro.",
                 'Suaviza dirección en mitad de curva.',
+            ],
+            'under_driving_grip' => [
+                "{$callsign}, {$turnName}: tienes margen de goma, entra más rápido.",
+                'Confía en el apoyo, el coche aguanta más.',
             ],
             'early_braking' => [
                 "{$callsign}, {$turnName}: retrasa {$metersBrake} metros la frenada{$gearSuffix}.",

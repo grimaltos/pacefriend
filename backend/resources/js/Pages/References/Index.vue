@@ -212,6 +212,8 @@ function pruneReferences(mode) {
 
 function sourceLabel(src, isOwned) {
     switch (src) {
+        case 'pacefriend_community': return 'Pool PaceFriend';
+        case 'personal_auto': return 'Auto PB Propia';
         case 'garage61_autopilot': return 'Autopilot G61';
         case 'garage61_manual': return 'G61 API';
         case 'g61_csv_upload': return 'G61 CSV';

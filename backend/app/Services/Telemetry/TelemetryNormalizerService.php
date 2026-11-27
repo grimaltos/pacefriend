@@ -61,6 +61,12 @@ class TelemetryNormalizerService
             if (isset($left['yaw'], $right['yaw'])) {
                 $point['yaw'] = round($this->lerp((float) $left['yaw'], (float) $right['yaw'], $alpha), 4);
             }
+            if (isset($left['lat_g'], $right['lat_g'])) {
+                $point['lat_g'] = round($this->lerp((float) $left['lat_g'], (float) $right['lat_g'], $alpha), 3);
+            }
+            if (isset($left['long_g'], $right['long_g'])) {
+                $point['long_g'] = round($this->lerp((float) $left['long_g'], (float) $right['long_g'], $alpha), 3);
+            }
             $sensorBits = (((int) ($left['flags'] ?? 0)) | ((int) ($right['flags'] ?? 0))) & (self::FLAG_ABS_ACTIVE | self::FLAG_CURB_STRIKE);
             if ($sensorBits !== 0) {
                 $point['flags'] = $sensorBits;
@@ -149,6 +155,9 @@ class TelemetryNormalizerService
             $absSamplesCount = 0;
             $coastingMs = 0;
             $curbUsed = false;
+            $peakLatG = 0.0;
+            $peakBrakeG = 0.0;
+            $peakCombinedG = 0.0;
 
             foreach ($windowSamples as $idx => $s) {
                 $pct = (float) ($s['pct'] ?? 0.0);
@@ -157,6 +166,24 @@ class TelemetryNormalizerService
                 $speed = (float) ($s['speed'] ?? 0.0);
                 $gear = (int) ($s['gear'] ?? 3);
                 $flags = (int) ($s['flags'] ?? 0);
+
+                // Friction circle G-loads (direct from LatAccel/LongAccel, or kinematic v*yaw fallback!)
+                $latG = isset($s['lat_g'])
+                    ? abs((float) $s['lat_g'])
+                    : (isset($s['yaw']) ? abs($speed * (float) $s['yaw']) / 9.80665 : 0.0);
+                $longG = isset($s['long_g']) ? (float) $s['long_g'] : 0.0;
+                $brakeG = $longG < 0 ? -$longG : 0.0;
+                $combG = hypot($latG, $longG);
+
+                if ($latG > $peakLatG && $latG < 6.0) {
+                    $peakLatG = $latG;
+                }
+                if ($brakeG > $peakBrakeG && $brakeG < 6.0) {
+                    $peakBrakeG = $brakeG;
+                }
+                if ($combG > $peakCombinedG && $combG < 6.5) {
+                    $peakCombinedG = $combG;
+                }
 
                 if ($brakeOnsetPct === null && $brake >= 0.12 && ! $passedApex) {
                     $brakeOnsetPct = $pct;
@@ -238,6 +265,9 @@ class TelemetryNormalizerService
                 'abs_active_ratio' => $absRatio,
                 'coasting_ms' => $coastingMs,
                 'curb_used' => $curbUsed,
+                'peak_lat_g' => round($peakLatG, 2),
+                'peak_brake_g' => round($peakBrakeG, 2),
+                'peak_combined_g' => round($peakCombinedG, 2),
                 'throttle_pickup_pct' => $throttlePickupPct ?? $apexPct,
                 'full_throttle_pct' => $fullThrottlePct ?? $exitPct,
                 'exit_speed_ms' => round((float) ($exitSample['speed'] ?? 0.0), 2),

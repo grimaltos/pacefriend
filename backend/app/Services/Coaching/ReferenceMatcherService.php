@@ -16,9 +16,10 @@ class ReferenceMatcherService
         string $carName,
         float $trackTempC,
         float $airTempC,
-        bool $isWet
+        bool $isWet,
+        ?int $driverBestLapMs = null
     ): ?ReferenceLap {
-        return $this->matchWithDiagnostics($userId, $trackId, $carName, $trackTempC, $airTempC, $isWet)['reference'];
+        return $this->matchWithDiagnostics($userId, $trackId, $carName, $trackTempC, $airTempC, $isWet, $driverBestLapMs)['reference'];
     }
 
     /**
@@ -37,7 +38,8 @@ class ReferenceMatcherService
         string $carName,
         float $trackTempC,
         float $airTempC,
-        bool $isWet
+        bool $isWet,
+        ?int $driverBestLapMs = null
     ): array {
         $candidates = ReferenceLap::query()
             ->where('track_id', $trackId)
@@ -74,9 +76,13 @@ class ReferenceMatcherService
             $rawTrackDelta = abs($trackTempC - $ref->track_temp_c);
             $distance = ($wTrack * $rawTrackDelta) + ($wAir * abs($airTempC - $ref->air_temp_c));
 
-            $tier = 0; // global seed
+            $tier = 0; // baseline pool (seed, pacefriend_community, personal_auto) -> fastest lap_time_ms wins!
             if ($ref->user_id === $userId) {
-                $tier = $ref->source === 'garage61_autopilot' ? 1 : 2;
+                if ($ref->source === 'garage61_autopilot') {
+                    $tier = 1;
+                } elseif (! in_array($ref->source, ['personal_auto', 'pacefriend_community', 'seed'], true)) {
+                    $tier = 2; // explicit user-imported references (.ibt, G61 manual/CSV, promoted lap)
+                }
             }
 
             return [
@@ -115,6 +121,27 @@ class ReferenceMatcherService
                 'discarded_reason' => null,
                 'discarded_ref' => null,
             ];
+        }
+
+        // Auto-harvested references (community pool & personal auto-PBs) are only used as external targets
+        // when they are meaningfully faster (> 150ms) than the driver's current session best; otherwise
+        // PaceFriend switches to Session Self-Reference + Friction Circle so even the fastest driver keeps improving!
+        if ($driverBestLapMs !== null && $driverBestLapMs > 0) {
+            $comparable = $comparable->filter(static function (array $item) use ($driverBestLapMs) {
+                if (in_array($item['ref']->source, ['pacefriend_community', 'personal_auto'], true)) {
+                    return $item['ref']->lap_time_ms < ($driverBestLapMs - 150);
+                }
+
+                return true;
+            });
+
+            if ($comparable->isEmpty()) {
+                return [
+                    'reference' => null,
+                    'discarded_reason' => 'auto_self_pace',
+                    'discarded_ref' => null,
+                ];
+            }
         }
 
         // 2. Standard thermal band matching within comparable candidates

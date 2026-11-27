@@ -43,6 +43,7 @@ class TrackCatalogController extends Controller
                 'name' => $validated['name'],
                 'length_km' => (float) $validated['length_km'],
                 'corners' => array_values($validated['corners']),
+                'corners_is_curated' => true,
             ]);
         } else {
             $track = Track::query()->updateOrCreate(
@@ -51,6 +52,7 @@ class TrackCatalogController extends Controller
                     'name' => $validated['name'],
                     'length_km' => (float) $validated['length_km'],
                     'corners' => array_values($validated['corners']),
+                    'corners_is_curated' => true,
                 ]
             );
         }

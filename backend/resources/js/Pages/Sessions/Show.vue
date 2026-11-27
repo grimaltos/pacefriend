@@ -57,6 +57,7 @@ const issueLabelMap = {
     wrong_gear_high: 'Causa raíz: Marcha demasiado larga en el vértice',
     throttle_understeer: 'Causa raíz: Gas precipitado → Subviraje de salida',
     understeer_scrub: 'Causa raíz: Exceso de volante (arrastre delantero)',
+    under_driving_grip: 'Causa raíz: Margen de agarre libre (Círculo de Fricción G)',
     missed_curb: 'Causa raíz: Esquivando piano interior aprovechable',
     missed_apex: 'Causa raíz: Vértice abierto (lejos del piano interior)',
     overslow_apex: 'Causa raíz: Exceso de freno residual en el vértice',

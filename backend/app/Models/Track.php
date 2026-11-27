@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['slug', 'garage61_track_id', 'name', 'length_km', 'corners', 'sectors'])]
+#[Fillable(['slug', 'garage61_track_id', 'name', 'length_km', 'corners', 'corners_is_curated', 'sectors'])]
 class Track extends Model
 {
     protected function casts(): array
@@ -15,6 +15,7 @@ class Track extends Model
             'garage61_track_id' => 'integer',
             'length_km' => 'float',
             'corners' => 'array',
+            'corners_is_curated' => 'boolean',
             'sectors' => 'array',
         ];
     }
@@ -107,6 +108,7 @@ class Track extends Model
             'slug' => $normalizedSlug,
             'name' => $name !== '' ? $name : ucwords(str_replace('-', ' ', $normalizedSlug)),
             'length_km' => $lengthKm > 0 ? $lengthKm : 5.0,
+            'corners_is_curated' => false,
             'corners' => [
                 ['turn' => 1, 'name' => 'Curva 1', 'brake_pct' => 0.120, 'apex_pct' => 0.150, 'exit_pct' => 0.180],
                 ['turn' => 2, 'name' => 'Curva 2', 'brake_pct' => 0.370, 'apex_pct' => 0.400, 'exit_pct' => 0.430],

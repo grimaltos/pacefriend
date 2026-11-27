@@ -10,6 +10,7 @@ use App\Models\ReferenceLap;
 use App\Models\Track;
 use App\Models\User;
 use App\Services\Coaching\CoachDiagnosticService;
+use App\Services\Coaching\CommunityKnowledgeService;
 use App\Services\Coaching\RadioEngineerService;
 use App\Services\Coaching\ReferenceMatcherService;
 use App\Services\Garage61\Garage61ImporterService;
@@ -25,6 +26,7 @@ class TelemetryLapController extends Controller
         private readonly CoachDiagnosticService $diagnostic,
         private readonly RadioEngineerService $radioEngineer,
         private readonly Garage61ImporterService $g61Importer,
+        private readonly CommunityKnowledgeService $communityKnowledge,
     ) {}
 
     public function briefing(Request $request): JsonResponse
@@ -147,6 +149,8 @@ class TelemetryLapController extends Controller
             'samples.*.lon' => ['nullable', 'numeric'],
             'samples.*.steer' => ['nullable', 'numeric'],
             'samples.*.yaw' => ['nullable', 'numeric'],
+            'samples.*.lat_g' => ['nullable', 'numeric'],
+            'samples.*.long_g' => ['nullable', 'numeric'],
         ]);
 
         /** @var User $user */
@@ -170,15 +174,6 @@ class TelemetryLapController extends Controller
             : 20.0;
         $isWet = (bool) ($validated['is_wet'] ?? false);
 
-        $referenceLap = $this->matcher->selectBestReference(
-            $user->id,
-            $track->id,
-            $validated['car_name'],
-            $trackTempC,
-            $airTempC,
-            $isWet
-        );
-
         $session = $this->resolveActiveDrivingSession(
             $user,
             $track,
@@ -188,7 +183,17 @@ class TelemetryLapController extends Controller
             $trackTempC,
             $airTempC,
             $isWet,
-            $referenceLap?->id
+            null
+        );
+
+        $referenceLap = $this->matcher->selectBestReference(
+            $user->id,
+            $track->id,
+            $validated['car_name'],
+            $trackTempC,
+            $airTempC,
+            $isWet,
+            $session->best_lap_time_ms
         );
 
         $sectorNum = (int) $validated['sector_number'];
@@ -368,6 +373,8 @@ class TelemetryLapController extends Controller
             'samples.*.lon' => ['nullable', 'numeric'],
             'samples.*.steer' => ['nullable', 'numeric'],
             'samples.*.yaw' => ['nullable', 'numeric'],
+            'samples.*.lat_g' => ['nullable', 'numeric'],
+            'samples.*.long_g' => ['nullable', 'numeric'],
         ]);
 
         /** @var User $user */
@@ -397,15 +404,6 @@ class TelemetryLapController extends Controller
             ? round((float) $validated['fuel_used_l'], 3)
             : null;
 
-        $referenceLap = $this->matcher->selectBestReference(
-            $user->id,
-            $track->id,
-            $validated['car_name'],
-            $trackTempC,
-            $airTempC,
-            $isWet
-        );
-
         $session = $this->resolveActiveDrivingSession(
             $user,
             $track,
@@ -415,10 +413,25 @@ class TelemetryLapController extends Controller
             $trackTempC,
             $airTempC,
             $isWet,
-            $referenceLap?->id
+            null
         );
 
         $previousBestMs = $session->best_lap_time_ms;
+        $currentCleanMs = (bool) $validated['is_clean'] ? (int) $validated['lap_time_ms'] : null;
+        $driverBestMs = ($previousBestMs !== null && $currentCleanMs !== null)
+            ? min($previousBestMs, $currentCleanMs)
+            : ($currentCleanMs ?? $previousBestMs);
+
+        $referenceLap = $this->matcher->selectBestReference(
+            $user->id,
+            $track->id,
+            $validated['car_name'],
+            $trackTempC,
+            $airTempC,
+            $isWet,
+            $driverBestMs
+        );
+
         $previousPlan = is_array($session->active_coaching_plan) ? $session->active_coaching_plan : null;
         $previousRef = $session->activeReferenceLap;
         $radioFlags = is_array($previousPlan['_radio_flags'] ?? null) ? $previousPlan['_radio_flags'] : [];
@@ -527,6 +540,10 @@ class TelemetryLapController extends Controller
             $lap = Lap::query()->create($lapPayload);
         }
         $lap->setRelation('track', $track);
+
+        // Feed PaceFriend's collective anonymized pool, track auto-discovery, G-profile & coaching feedback loop!
+        $this->communityKnowledge->recordCoachingOutcome($lap, $previousPlan);
+        $this->communityKnowledge->ingestCleanLap($lap, $track);
 
         $newLapsCount = $session->laps_count + 1;
         $newCleanCount = $session->clean_laps_count + ($lap->is_clean ? 1 : 0);

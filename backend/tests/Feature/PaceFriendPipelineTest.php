@@ -482,6 +482,202 @@ class PaceFriendPipelineTest extends TestCase
         $this->assertStringContainsString('ABS', $plan['triggers'][0]['text']);
     }
 
+    public function test_collective_learning_auto_discovers_track_corners_anonymizes_community_pool_and_detects_under_driving_grip(): void
+    {
+        $pilotA = User::factory()->create([
+            'name' => 'Alex Rapido',
+            'driver_callsign' => 'Alex',
+            'preferences' => ['min_clean_laps' => 2],
+        ]);
+        $tokenA = $pilotA->createToken('RigA')->plainTextToken;
+
+        // 1. Pilot A drives 2 fast clean laps on a brand-new uncurated circuit ('navarra-gp') pulling 1.65G lateral
+        foreach ([1 => 98200, 2 => 97800] as $lapNum => $lapMs) {
+            $this->withHeader('Authorization', "Bearer {$tokenA}")
+                ->postJson('/api/v1/telemetry/lap', [
+                    'track_slug' => 'navarra-gp',
+                    'track_name' => 'Circuito de Navarra',
+                    'track_length_km' => 3.933,
+                    'car_name' => 'Porsche 911 GT3 R (992)',
+                    'session_id' => 6100,
+                    'sub_session_id' => 6200,
+                    'lap_number' => $lapNum,
+                    'lap_time_ms' => $lapMs,
+                    'is_clean' => true,
+                    'track_temp_c' => 26.0,
+                    'air_temp_c' => 19.5,
+                    'samples' => $this->buildNavarraGripSamples($lapMs, cornerLatG: 1.65, earlyBrakeMeters: 0.0),
+                ])->assertCreated();
+        }
+
+        // Verify zero-config corner auto-discovery mapped Navarra's 3 real corners automatically
+        $navarra = Track::query()->where('slug', 'navarra-gp')->firstOrFail();
+        $this->assertTrue($navarra->corners_is_curated);
+        $this->assertCount(3, $navarra->corners);
+
+        // Verify 100% anonymized community pool reference (driver_name = null, user_id = null)
+        $communityRef = ReferenceLap::query()
+            ->where('track_id', $navarra->id)
+            ->where('source', 'pacefriend_community')
+            ->firstOrFail();
+        $this->assertNull($communityRef->user_id);
+        $this->assertNull($communityRef->driver_name);
+        $this->assertSame(97800, $communityRef->lap_time_ms);
+
+        // Verify CarPhysicsProfile learned the 1.65G lateral grip ceiling
+        $carProfile = \App\Models\CarPhysicsProfile::query()
+            ->where('car_name', 'Porsche 911 GT3 R (992)')
+            ->firstOrFail();
+        $this->assertGreaterThan(1.55, $carProfile->p90_lat_g);
+
+        // 2. Pilot B joins Navarra WITHOUT Garage 61 and drives 3 slower laps (100.4s -> 100.1s -> 99.8s)
+        $this->app['auth']->forgetGuards();
+        $pilotB = User::factory()->create([
+            'name' => 'Vicent Grimaltos',
+            'driver_callsign' => 'Vicent',
+            'preferences' => ['min_clean_laps' => 2],
+        ]);
+        $tokenB = $pilotB->createToken('RigB')->plainTextToken;
+
+        $respB2 = null;
+        foreach ([1 => 100400, 2 => 100100, 3 => 99800] as $lapNum => $lapMs) {
+            $resp = $this->withHeader('Authorization', "Bearer {$tokenB}")
+                ->postJson('/api/v1/telemetry/lap', [
+                    'track_slug' => 'navarra-gp',
+                    'track_name' => 'Circuito de Navarra',
+                    'track_length_km' => 3.933,
+                    'car_name' => 'Porsche 911 GT3 R (992)',
+                    'session_id' => 6300,
+                    'sub_session_id' => 6400,
+                    'lap_number' => $lapNum,
+                    'lap_time_ms' => $lapMs,
+                    'is_clean' => true,
+                    'track_temp_c' => 26.5,
+                    'air_temp_c' => 20.0,
+                    'samples' => $this->buildNavarraGripSamples($lapMs, cornerLatG: 1.45, earlyBrakeMeters: 28.0),
+                ]);
+            $resp->assertCreated();
+            if ($lapNum === 2) {
+                $respB2 = $resp;
+            }
+        }
+
+        // Pilot B is automatically coached against Pilot A's anonymized community lap, and slower laps NEVER overwrite 97800ms!
+        $this->assertSame($communityRef->id, $respB2->json('matched_reference_lap_id'));
+        $this->assertNotNull($respB2->json('coaching_plan'));
+        $this->assertSame(97800, $communityRef->fresh()->lap_time_ms);
+        $this->assertGreaterThanOrEqual(1, \App\Models\CoachingOutcome::query()->where('track_id', $navarra->id)->count());
+
+        // 3. Now Pilot B drives at scorching 42.0 °C (no external reference -> session_self) using only 0.85G of the 1.65G Grip Circle!
+        $hotResp = null;
+        for ($lapNum = 1; $lapNum <= 2; $lapNum++) {
+            $hotResp = $this->withHeader('Authorization', "Bearer {$tokenB}")
+                ->postJson('/api/v1/telemetry/lap', [
+                    'track_slug' => 'navarra-gp',
+                    'track_name' => 'Circuito de Navarra',
+                    'track_length_km' => 3.933,
+                    'car_name' => 'Porsche 911 GT3 R (992)',
+                    'session_id' => 6500,
+                    'sub_session_id' => 6600,
+                    'lap_number' => $lapNum,
+                    'lap_time_ms' => 102500,
+                    'is_clean' => true,
+                    'track_temp_c' => 42.0,
+                    'air_temp_c' => 31.0,
+                    'samples' => $this->buildNavarraGripSamples(102500, cornerLatG: 0.85, earlyBrakeMeters: 0.0),
+                ]);
+            $hotResp->assertCreated();
+        }
+
+        $gripPlan = $hotResp->json('coaching_plan');
+        $this->assertNotNull($gripPlan);
+        $this->assertSame('session_self', $gripPlan['reference_mode']);
+        $this->assertSame('under_driving_grip', $gripPlan['primary_issue']);
+        $this->assertStringContainsString('Vicent,', $gripPlan['triggers'][0]['text']);
+        $this->assertStringContainsString('margen de goma', $gripPlan['triggers'][0]['text']);
+    }
+
+    /**
+     * Build synthetic 250-sample telemetry for a 3-corner circuit with configurable Friction Circle lateral G.
+     *
+     * @return array<int, array<string, float|int>>
+     */
+    private function buildNavarraGripSamples(int $lapTimeMs, float $cornerLatG, float $earlyBrakeMeters): array
+    {
+        $samples = [];
+        $steps = 250;
+        $trackMeters = 3933.0;
+        $stepMeters = $trackMeters / $steps;
+        $earlyPctOffset = $earlyBrakeMeters / $trackMeters;
+        $elapsedMs = 0.0;
+
+        $zones = [
+            [0.150, 0.180, 0.215],
+            [0.450, 0.480, 0.515],
+            [0.750, 0.780, 0.815],
+        ];
+
+        for ($i = 0; $i < $steps; $i++) {
+            $pct = round($i / $steps, 4);
+            $speed = 66.0;
+            $throttle = 1.0;
+            $brake = 0.0;
+            $latG = 0.05;
+            $longG = 0.25;
+            $gear = 5;
+
+            foreach ($zones as $idx => [$bPct, $aPct, $ePct]) {
+                $effBrakePct = $idx === 0 ? ($bPct - $earlyPctOffset) : $bPct;
+                if ($pct >= $effBrakePct && $pct <= $ePct) {
+                    if ($pct < $aPct) {
+                        $speed = $pct < ($aPct - 0.010) ? 44.0 : 29.0;
+                        $brake = 0.82;
+                        $throttle = 0.0;
+                        $longG = -1.25;
+                        $latG = $cornerLatG * 0.65;
+                    } else {
+                        $speed = $pct < ($aPct + 0.012) ? 28.5 : 46.0;
+                        $brake = 0.0;
+                        $throttle = $pct >= ($aPct + 0.008) ? 0.96 : 0.25;
+                        $longG = 0.45;
+                        $latG = $cornerLatG;
+                    }
+                    $gear = 2;
+                    break;
+                }
+            }
+
+            $steerRad = 0.0;
+            if ($latG > 0.3) {
+                // Smooth progressive turn-in so dSteer/dt stays realistic (< 120 deg/s)
+                $steerRad = $brake > 0.1 ? -0.14 : -0.28;
+            }
+
+            $samples[] = [
+                't_ms' => (int) round($elapsedMs),
+                'pct' => $pct,
+                'speed' => $speed,
+                'throttle' => $throttle,
+                'brake' => $brake,
+                'lat_g' => round($latG, 3),
+                'long_g' => round($longG, 3),
+                'steer' => $steerRad,
+                'yaw' => $latG > 0.3 ? -0.28 : 0.0,
+                'lap' => 1,
+                'gear' => $gear,
+                'flags' => 0,
+            ];
+            $elapsedMs += ($stepMeters / $speed) * 1000.0;
+        }
+
+        $scale = $elapsedMs > 0 ? ($lapTimeMs / $elapsedMs) : 1.0;
+        foreach ($samples as &$s) {
+            $s['t_ms'] = (int) round($s['t_ms'] * $scale);
+        }
+
+        return $samples;
+    }
+
     /**
      * Build synthetic Spa telemetry with realistic 64-bit Lat/Lon heading right at Turn 5 (Les Combes, pct ~ 0.28..0.33).
      *

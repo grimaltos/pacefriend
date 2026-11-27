@@ -36,6 +36,7 @@ class SyncTracksCatalogCommand extends Command
                     'name' => $entry['name'],
                     'length_km' => (float) ($entry['length_km'] ?? 5.0),
                     'corners' => $entry['corners'],
+                    'corners_is_curated' => true,
                 ]
             );
             $count++;

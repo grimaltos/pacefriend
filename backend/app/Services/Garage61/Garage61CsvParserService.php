@@ -41,6 +41,8 @@ class Garage61CsvParserService
         $absIdx = $colMap['brakeabsactive'] ?? $colMap['absactive'] ?? $colMap['abs'] ?? null;
         $lfRumbleIdx = $colMap['tirelf_rumblepitch'] ?? $colMap['lfrumble'] ?? null;
         $rfRumbleIdx = $colMap['tirerf_rumblepitch'] ?? $colMap['rfrumble'] ?? null;
+        $latAccIdx = $colMap['lataccel'] ?? $colMap['lat_accel'] ?? $colMap['latg'] ?? null;
+        $longAccIdx = $colMap['longaccel'] ?? $colMap['long_accel'] ?? $colMap['longg'] ?? null;
 
         if ($pctIdx === null || $speedIdx === null || $throttleIdx === null || $brakeIdx === null) {
             throw new InvalidArgumentException('El CSV de Garage 61 no incluye las columnas base requeridas (LapDistPct, Speed, Throttle, Brake).');
@@ -52,6 +54,7 @@ class Garage61CsvParserService
         $maxBrakeSeen = 0.0;
         $maxSteerAbs = 0.0;
         $maxYawAbs = 0.0;
+        $maxAccAbs = 0.0;
         $detectedTrackTemp = null;
         $detectedAirTemp = null;
 
@@ -81,6 +84,14 @@ class Garage61CsvParserService
             $lonVal = ($lonIdx !== null && isset($cols[$lonIdx]) && is_numeric($cols[$lonIdx])) ? (float) $cols[$lonIdx] : null;
             $steerVal = ($steerIdx !== null && isset($cols[$steerIdx]) && is_numeric($cols[$steerIdx])) ? (float) $cols[$steerIdx] : null;
             $yawVal = ($yawIdx !== null && isset($cols[$yawIdx]) && is_numeric($cols[$yawIdx])) ? (float) $cols[$yawIdx] : null;
+            $latAccVal = ($latAccIdx !== null && isset($cols[$latAccIdx]) && is_numeric($cols[$latAccIdx])) ? (float) $cols[$latAccIdx] : null;
+            $longAccVal = ($longAccIdx !== null && isset($cols[$longAccIdx]) && is_numeric($cols[$longAccIdx])) ? (float) $cols[$longAccIdx] : null;
+            if ($latAccVal !== null) {
+                $maxAccAbs = max($maxAccAbs, abs($latAccVal));
+            }
+            if ($longAccVal !== null) {
+                $maxAccAbs = max($maxAccAbs, abs($longAccVal));
+            }
             $flags = 0;
             if ($absIdx !== null && isset($cols[$absIdx]) && ((float) $cols[$absIdx] > 0.5 || strtolower(trim($cols[$absIdx])) === 'true')) {
                 $flags |= 8; // FlagABSActive
@@ -111,6 +122,8 @@ class Garage61CsvParserService
                 'lon' => $lonVal,
                 'steer' => $steerVal,
                 'yaw' => $yawVal,
+                'lat_acc' => $latAccVal,
+                'long_acc' => $longAccVal,
                 'flags' => $flags,
             ];
         }
@@ -125,6 +138,7 @@ class Garage61CsvParserService
         $brakeDivisor = $maxBrakeSeen > 1.5 ? 100.0 : 1.0;
         $steerScale = $maxSteerAbs > 14.0 ? (M_PI / 180.0) : 1.0;
         $yawScale = $maxYawAbs > 8.0 ? (M_PI / 180.0) : 1.0;
+        $accScale = $maxAccAbs > 5.5 ? (1.0 / 9.80665) : 1.0;
 
         // Downsample dense 60 Hz CSVs to ~350 points for fast JSONB storage & analysis
         $total = count($rawRows);
@@ -172,6 +186,12 @@ class Garage61CsvParserService
             }
             if ($r['yaw'] !== null) {
                 $sampleRow['yaw'] = round($r['yaw'] * $yawScale, 4);
+            }
+            if ($r['lat_acc'] !== null) {
+                $sampleRow['lat_g'] = round($r['lat_acc'] * $accScale, 3);
+            }
+            if ($r['long_acc'] !== null) {
+                $sampleRow['long_g'] = round($r['long_acc'] * $accScale, 3);
             }
             $samples[] = $sampleRow;
         }

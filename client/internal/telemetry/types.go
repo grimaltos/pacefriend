@@ -17,7 +17,7 @@ const (
 	FlagsDirtyMask SampleFlags = FlagOffTrack | FlagOnPitRoad | FlagIncident
 )
 
-// Sample is a pointer-free (noscan) 56-byte telemetry point stored at 20 Hz.
+// Sample is a pointer-free (noscan) 64-byte telemetry point stored at 20 Hz.
 // Keeping this struct strictly free of pointers ensures Go's garbage collector
 // never scans the ring buffer backing array, guaranteeing zero GC impact.
 type Sample struct {
@@ -30,6 +30,8 @@ type Sample struct {
 	Brake       float32     `json:"brake"`
 	Steer       float32     `json:"steer,omitempty"`
 	YawRate     float32     `json:"yaw,omitempty"`
+	LatG        float32     `json:"lat_g,omitempty"`
+	LongG       float32     `json:"long_g,omitempty"`
 	Lap         int32       `json:"lap"`
 	Gear        int16       `json:"gear"`
 	Flags       SampleFlags `json:"flags"`

@@ -197,6 +197,12 @@ class IbtFileParserService
             if (isset($vars['YawRate'])) {
                 $sampleItem['yaw'] = round((float) $this->readScalar($bytes, $rowOffset, $vars['YawRate']), 4);
             }
+            if (isset($vars['LatAccel'])) {
+                $sampleItem['lat_g'] = round(((float) $this->readScalar($bytes, $rowOffset, $vars['LatAccel'])) / 9.80665, 3);
+            }
+            if (isset($vars['LongAccel'])) {
+                $sampleItem['long_g'] = round(((float) $this->readScalar($bytes, $rowOffset, $vars['LongAccel'])) / 9.80665, 3);
+            }
             $laps[$lapNum]['samples'][] = $sampleItem;
         }
 

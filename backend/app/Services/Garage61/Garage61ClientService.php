@@ -4,10 +4,14 @@ namespace App\Services\Garage61;
 
 use App\Models\Track;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
+/**
+ * Official Garage 61 API v1 client adhering strictly to https://garage61.net/api/openapi/v1.yml
+ */
 class Garage61ClientService
 {
     private function client(string $token): PendingRequest
@@ -21,7 +25,8 @@ class Garage61ClientService
     }
 
     /**
-     * Validate Personal Access Token / OAuth token and return profile + joined teams.
+     * Validate Personal Access Token / OAuth token and return Me schema
+     * (id, slug, firstName, lastName, subscriptionPlan, apiPermissions, teams).
      *
      * @return array<string, mixed>
      */
@@ -29,7 +34,7 @@ class Garage61ClientService
     {
         $resp = $this->client($token)->get('/me');
         if (! $resp->successful()) {
-            throw new RuntimeException('Token de Garage 61 inválido o rechazado (HTTP '.$resp->status().').');
+            throw new RuntimeException($this->formatApiError($resp, 'Token de Garage 61 inválido o rechazado.'));
         }
 
         return $resp->json() ?? [];
@@ -45,72 +50,100 @@ class Garage61ClientService
             return [];
         }
 
-        $data = $resp->json();
-        return $data['items'] ?? (is_array($data) ? $data : []);
+        return $resp->json('items') ?? [];
     }
 
     /**
+     * Return available iRacing tracks from Garage 61 (TrackInfo: id, name, variant, platform).
+     *
      * @return array<int, array<string, mixed>>
      */
     public function listTracks(string $token): array
     {
-        return Cache::remember('garage61:catalog:tracks', now()->addHours(12), function () use ($token) {
+        return Cache::remember('garage61:v2:tracks', now()->addHours(12), function () use ($token) {
             $resp = $this->client($token)->get('/tracks');
             if (! $resp->successful()) {
                 return [];
             }
-            $data = $resp->json();
-            return $data['items'] ?? (is_array($data) ? $data : []);
+            $items = $resp->json('items') ?? [];
+            return array_values(array_filter($items, static fn (array $t) => ($t['platform'] ?? 'iracing') === 'iracing'));
         });
     }
 
     /**
+     * Return available iRacing cars from Garage 61 (CarInfo: id, name, platform).
+     *
      * @return array<int, array<string, mixed>>
      */
     public function listCars(string $token): array
     {
-        return Cache::remember('garage61:catalog:cars', now()->addHours(12), function () use ($token) {
+        return Cache::remember('garage61:v2:cars', now()->addHours(12), function () use ($token) {
             $resp = $this->client($token)->get('/cars');
             if (! $resp->successful()) {
                 return [];
             }
-            $data = $resp->json();
-            return $data['items'] ?? (is_array($data) ? $data : []);
+            $items = $resp->json('items') ?? [];
+            return array_values(array_filter($items, static fn (array $c) => ($c['platform'] ?? 'iracing') === 'iracing'));
         });
     }
 
     /**
-     * Resolve Garage 61 numeric/string IDs for a given PaceFriend Track and iRacing Car name.
+     * List saved analyses accessible to the authenticated user.
      *
-     * @return array{track_id: int|string|null, car_id: int|string|null}
+     * @return array<int, array<string, mixed>>
+     */
+    public function listAnalyses(string $token): array
+    {
+        $resp = $this->client($token)->get('/analyses', ['limit' => 50]);
+        if (! $resp->successful()) {
+            return [];
+        }
+
+        return $resp->json('items') ?? [];
+    }
+
+    /**
+     * Resolve Garage 61 integer IDs for a PaceFriend Track and iRacing Car name.
+     *
+     * @return array{track_id: int|null, car_id: int|null}
      */
     public function resolveTrackAndCarIds(string $token, Track $track, string $carName): array
     {
         $g61TrackId = $track->garage61_track_id;
 
         if ($g61TrackId === null) {
-            $needle = strtolower($track->name);
+            $bestScore = 0;
+            $targetTokens = $this->tokenize($track->name.' '.str_replace('-', ' ', $track->slug));
+
             foreach ($this->listTracks($token) as $gt) {
-                $gName = strtolower((string) ($gt['name'] ?? ''));
-                $gVariant = strtolower((string) ($gt['variant'] ?? ''));
-                $combined = trim("{$gName} {$gVariant}");
-                if ($gName !== '' && (str_contains($needle, $gName) || str_contains($combined, $needle))) {
-                    $g61TrackId = $gt['id'] ?? null;
-                    if (is_numeric($g61TrackId)) {
-                        $track->update(['garage61_track_id' => (int) $g61TrackId]);
-                    }
-                    break;
+                $candTokens = $this->tokenize(($gt['name'] ?? '').' '.($gt['variant'] ?? ''));
+                $overlap = count(array_intersect($targetTokens, $candTokens));
+                if ($overlap > $bestScore && $overlap >= 1) {
+                    $bestScore = $overlap;
+                    $g61TrackId = isset($gt['id']) ? (int) $gt['id'] : null;
                 }
+            }
+
+            if ($g61TrackId !== null) {
+                $track->update(['garage61_track_id' => $g61TrackId]);
             }
         }
 
         $g61CarId = null;
-        $carNeedle = strtolower($carName);
+        $carNeedle = strtolower(trim($carName));
+        $bestCarScore = 0;
+        $carTokens = $this->tokenize($carName);
+
         foreach ($this->listCars($token) as $gc) {
-            $cName = strtolower((string) ($gc['name'] ?? ''));
-            if ($cName !== '' && ($cName === $carNeedle || str_contains($cName, $carNeedle) || str_contains($carNeedle, $cName))) {
-                $g61CarId = $gc['id'] ?? null;
+            $cName = strtolower(trim((string) ($gc['name'] ?? '')));
+            if ($cName === $carNeedle) {
+                $g61CarId = (int) $gc['id'];
                 break;
+            }
+            $overlap = count(array_intersect($carTokens, $this->tokenize($cName)));
+            if ($overlap > $bestCarScore && $overlap >= 2) {
+                $bestCarScore = $overlap;
+                $g61CarId = (int) $gc['id'];
             }
         }
 
@@ -121,35 +154,42 @@ class Garage61ClientService
     }
 
     /**
-     * Search Garage 61 laps filtering for accessible telemetry (canViewTelemetry = true)
-     * and recent season builds.
+     * Search Garage 61 laps using official OpenAPI v1 parameters:
+     * - tracks (required int array, comma-separated)
+     * - cars (int array)
+     * - teams (team slugs, comma-separated)
+     * - minConditionsTrackTemp / maxConditionsTrackTemp
+     * - lapTypes=1 (normal full clean laps)
+     * - age=-2 (current and previous season)
      *
      * @param  array<string, mixed>  $query
      * @return array<int, array<string, mixed>>
      */
     public function searchLaps(string $token, array $query): array
     {
-        $maxAgeDays = (int) config('pacefriend.garage61.max_lap_age_days', 90);
         $params = array_filter(array_merge([
-            'clean' => 'true',
-            'after' => now()->subDays($maxAgeDays)->toIso8601String(),
-            'limit' => 25,
+            'lapTypes' => '1',
+            'age' => -2,
+            'group' => 'none',
+            'limit' => 40,
         ], $query), static fn ($v) => $v !== null && $v !== '');
+
+        if (empty($params['tracks'])) {
+            throw new RuntimeException('No se pudo mapear el circuito en Garage 61. Selecciónalo en el desplegable de G61.');
+        }
 
         $resp = $this->client($token)->get('/laps', $params);
         if (! $resp->successful()) {
-            throw new RuntimeException('Error al consultar vueltas en Garage 61 (HTTP '.$resp->status().').');
+            throw new RuntimeException($this->formatApiError($resp, 'Error al buscar vueltas en Garage 61.'));
         }
 
-        $json = $resp->json() ?? [];
-        $items = $json['items'] ?? (is_array($json) ? $json : []);
+        $items = $resp->json('items') ?? [];
 
-        // Enforce telemetry visibility & clean status
         return array_values(array_filter($items, static function (array $lap) {
-            if (isset($lap['canViewTelemetry']) && $lap['canViewTelemetry'] === false) {
+            if (($lap['canViewTelemetry'] ?? true) === false) {
                 return false;
             }
-            if (isset($lap['clean']) && $lap['clean'] === false) {
+            if (($lap['clean'] ?? true) === false || ($lap['incomplete'] ?? false) === true) {
                 return false;
             }
             return isset($lap['id']);
@@ -165,7 +205,10 @@ class Garage61ClientService
     {
         $resp = $this->client($token)->get("/laps/{$lapId}");
         if (! $resp->successful()) {
-            throw new RuntimeException("No se pudo obtener la vuelta {$lapId} en Garage 61 (HTTP {$resp->status()}).");
+            throw new RuntimeException($this->formatApiError(
+                $resp,
+                "No se pudo obtener la vuelta {$lapId} en Garage 61"
+            ));
         }
 
         return $resp->json() ?? [];
@@ -180,20 +223,23 @@ class Garage61ClientService
 
         $resp = Http::baseUrl($baseUrl)
             ->withToken(trim($token))
-            ->withHeaders(['Accept' => 'text/csv, application/octet-stream, */*'])
+            ->withHeaders(['Accept' => 'text/csv, application/json, */*'])
             ->timeout(25)
             ->get("/laps/{$lapId}/csv");
 
         if (! $resp->successful() || trim($resp->body()) === '') {
-            throw new RuntimeException("No tienes permiso para descargar la telemetría CSV de la vuelta {$lapId} o no está disponible.");
+            throw new RuntimeException($this->formatApiError(
+                $resp,
+                "No se pudo descargar el CSV de la vuelta {$lapId}"
+            ));
         }
 
         return $resp->body();
     }
 
     /**
-     * Extract one or multiple Garage 61 lap IDs from a pasted Lap URL, Analysis URL,
-     * comma-separated list, or direct ID. If an analysis endpoint exists, resolves its laps.
+     * Extract one or multiple Garage 61 lap IDs from a pasted Lap URL, Analysis URL/ID,
+     * Event URL, or comma-separated list of IDs.
      *
      * @return array<int, string>
      */
@@ -204,7 +250,7 @@ class Garage61ClientService
             return [];
         }
 
-        // 1. Check query string ?laps=id1,id2 or ?lap=id1 (common in Garage 61 comparison/analysis URLs)
+        // 1. Query string ?laps=id1,id2
         $queryString = parse_url($trimmed, PHP_URL_QUERY);
         if (is_string($queryString) && $queryString !== '') {
             parse_str($queryString, $qParams);
@@ -219,33 +265,92 @@ class Garage61ClientService
             }
         }
 
-        // 2. Check /laps/{id} path
+        // 2. Explicit /laps/{id}
         if (preg_match('~/laps/([A-Za-z0-9_-]{8,64})~', $trimmed, $m)) {
             return [$m[1]];
         }
 
-        // 3. Check /analysis/{id} or /analyses/{id} path and attempt API resolution if supported
+        // 3. Explicit /analysis/{id} or /analyses/{id} -> resolve AnalysisLaps or AnalysisTrainingPlan
         if (preg_match('~/analys[ie]s/([A-Za-z0-9_-]{8,64})~', $trimmed, $m)) {
-            $analysisId = $m[1];
-            $resp = $this->client($token)->get("/analyses/{$analysisId}");
-            if ($resp->successful()) {
-                $data = $resp->json() ?? [];
-                $laps = $data['laps'] ?? $data['lapIds'] ?? [];
-                $extracted = [];
-                foreach ($laps as $item) {
-                    $extracted[] = is_array($item) ? ($item['id'] ?? '') : (string) $item;
-                }
-                $cleaned = $this->sanitizeIdList($extracted);
-                if ($cleaned !== []) {
-                    return $cleaned;
-                }
-            }
-            // Fallback: treat the extracted token itself if user pasted a direct lap link variant
-            return [$analysisId];
+            return $this->resolveAnalysisLapIds($token, $m[1]);
         }
 
-        // 4. Plain comma/space-separated IDs (ULIDs / UUIDs)
+        // 4. Explicit /events/{id} -> extract fastest clean lap from EventDetails
+        if (preg_match('~/events/([A-Za-z0-9_-]{8,64})~', $trimmed, $m)) {
+            $resp = $this->client($token)->get("/events/{$m[1]}");
+            if ($resp->successful()) {
+                $laps = array_filter(
+                    $resp->json('laps') ?? [],
+                    static fn (array $l) => ($l['clean'] ?? false) && ($l['canViewTelemetry'] ?? false)
+                );
+                usort($laps, static fn (array $a, array $b) => ($a['lapTime'] ?? 9999) <=> ($b['lapTime'] ?? 9999));
+                if ($laps !== []) {
+                    return [(string) $laps[0]['id']];
+                }
+            }
+        }
+
+        // 5. Raw ID(s): could be either a Lap ID or an Analysis ID!
         return $this->sanitizeIdList(preg_split('/[\s,]+/', $trimmed) ?: []);
+    }
+
+    /**
+     * Resolve an Analysis ID into its constituent Lap IDs per OpenAPI schema.
+     *
+     * @return array<int, string>
+     */
+    public function resolveAnalysisLapIds(string $token, string $analysisId): array
+    {
+        $resp = $this->client($token)->get("/analyses/{$analysisId}");
+        if (! $resp->successful()) {
+            throw new RuntimeException($this->formatApiError(
+                $resp,
+                "No se pudo abrir el análisis {$analysisId} en Garage 61"
+            ));
+        }
+
+        $data = $resp->json() ?? [];
+        if (($data['type'] ?? '') === 'laps' && ! empty($data['laps'])) {
+            return $this->sanitizeIdList($data['laps']);
+        }
+        if (! empty($data['results']) && is_array($data['results'])) {
+            $ids = array_map(static fn (array $r) => $r['lap'] ?? '', $data['results']);
+            return $this->sanitizeIdList($ids);
+        }
+
+        return [];
+    }
+
+    /**
+     * Translate Garage 61 HTTP 401/403/429 responses into clear actionable Spanish messages.
+     */
+    private function formatApiError(Response $resp, string $prefix): string
+    {
+        $status = $resp->status();
+        $apiMsg = (string) ($resp->json('message') ?? '');
+
+        if ($status === 403) {
+            return "{$prefix} (HTTP 403 Acceso Denegado). En la API de Garage 61 un Personal Access Token solo tiene permiso para leer tus propias vueltas y las de tus compañeros de equipo (F·R·I·E·N·D·S), o bien el permiso 'driving_data' sigue pendiente de activación en tu token. Si es una vuelta pública de un piloto externo, descárgala como CSV desde la web de Garage 61 y súbela en el formulario izquierdo.";
+        }
+        if ($status === 429) {
+            return "{$prefix} (HTTP 429 Límite de peticiones de Garage 61 alcanzado, espera unos segundos).";
+        }
+
+        return $apiMsg !== ''
+            ? "{$prefix} (HTTP {$status}: {$apiMsg})"
+            : "{$prefix} (HTTP {$status}).";
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function tokenize(string $text): array
+    {
+        $clean = preg_replace('/[^a-z0-9]+/', ' ', strtolower($text)) ?? '';
+        $stopWords = ['de', 'la', 'del', 'the', 'at', 'in', 'full', 'gp', 'circuit', 'international', 'raceway', 'speedway', 'autodromo', 'course'];
+        $parts = array_filter(explode(' ', $clean), static fn (string $w) => strlen($w) >= 2 && ! in_array($w, $stopWords, true));
+
+        return array_values(array_unique($parts));
     }
 
     /**

@@ -86,11 +86,14 @@ class Garage61IntegrationTest extends TestCase
     public function test_option_c_progressive_autopilot_picks_step_up_lap_and_levels_up_when_beaten(): void
     {
         Http::fake([
+            'https://garage61.net/api/v1/teams' => Http::response([
+                'items' => [['id' => 't1', 'name' => 'F·R·I·E·N·D·S', 'slug' => 'friends', 'isOwner' => true]],
+            ], 200),
             'https://garage61.net/api/v1/tracks' => Http::response([
-                'items' => [['id' => 44, 'name' => 'Autodromo Internazionale Enzo e Dino Ferrari']],
+                'items' => [['id' => 44, 'name' => 'Autodromo Internazionale Enzo e Dino Ferrari', 'variant' => 'Grand Prix', 'platform' => 'iracing']],
             ], 200),
             'https://garage61.net/api/v1/cars' => Http::response([
-                'items' => [['id' => 99, 'name' => 'Porsche 911 GT3 R (992)']],
+                'items' => [['id' => 99, 'name' => 'Porsche 911 GT3 R (992)', 'platform' => 'iracing']],
             ], 200),
             'https://garage61.net/api/v1/laps*' => function ($request) {
                 $url = $request->url();

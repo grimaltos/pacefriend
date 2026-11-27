@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Lap;
 use App\Models\ReferenceLap;
 use App\Models\Track;
+use App\Services\Garage61\Garage61ClientService;
 use App\Services\Garage61\Garage61CsvParserService;
 use App\Services\Garage61\Garage61ImporterService;
 use App\Services\Telemetry\IbtFileParserService;
@@ -23,6 +24,7 @@ class ReferenceLapController extends Controller
     public function __construct(
         private readonly IbtFileParserService $ibtParser,
         private readonly Garage61CsvParserService $g61CsvParser,
+        private readonly Garage61ClientService $g61Client,
         private readonly TelemetryNormalizerService $normalizer,
         private readonly Garage61ImporterService $g61Importer,
     ) {}
@@ -55,10 +57,38 @@ class ReferenceLapController extends Controller
                 'created_at' => $r->created_at?->toIso8601String(),
             ]);
 
+        $g61Tracks = [];
+        $g61Cars = [];
+        $g61Analyses = [];
+
+        if (filled($user->garage61_token)) {
+            try {
+                $token = (string) $user->garage61_token;
+                $g61Tracks = array_map(static fn (array $t) => [
+                    'id' => $t['id'],
+                    'label' => trim(($t['name'] ?? '').(! empty($t['variant']) ? ' — '.$t['variant'] : '')),
+                ], $this->g61Client->listTracks($token));
+                usort($g61Tracks, static fn (array $a, array $b) => strcmp($a['label'], $b['label']));
+
+                $g61Cars = array_map(static fn (array $c) => [
+                    'id' => $c['id'],
+                    'name' => $c['name'] ?? '',
+                ], $this->g61Client->listCars($token));
+                usort($g61Cars, static fn (array $a, array $b) => strcmp($a['name'], $b['name']));
+
+                $g61Analyses = $this->g61Client->listAnalyses($token);
+            } catch (\Throwable) {
+                // Non-fatal if G61 catalog temporarily unavailable
+            }
+        }
+
         return Inertia::render('References/Index', [
             'references' => $references,
             'tracks' => Track::query()->orderBy('name')->get(['id', 'slug', 'name']),
             'garage61Connected' => filled($user->garage61_token),
+            'g61Tracks' => $g61Tracks,
+            'g61Cars' => $g61Cars,
+            'g61Analyses' => $g61Analyses,
         ]);
     }
 
@@ -205,21 +235,25 @@ class ReferenceLapController extends Controller
     public function searchGarage61(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'track_id' => ['required', 'integer', 'exists:tracks,id'],
-            'car_name' => ['required', 'string', 'max:160'],
+            'track_id' => ['nullable', 'integer', 'exists:tracks,id'],
+            'g61_track_id' => ['nullable', 'integer', 'min:1'],
+            'g61_car_id' => ['nullable', 'integer', 'min:1'],
+            'car_name' => ['nullable', 'string', 'max:160'],
             'track_temp_c' => ['nullable', 'numeric', 'min:-10', 'max:75'],
             'only_team' => ['nullable', 'boolean'],
         ]);
 
-        $track = Track::query()->findOrFail((int) $validated['track_id']);
+        $track = ! empty($validated['track_id']) ? Track::query()->find((int) $validated['track_id']) : null;
 
         try {
             $items = $this->g61Importer->searchForPanel(
                 $request->user(),
                 $track,
-                $validated['car_name'],
-                isset($validated['track_temp_c']) ? (float) $validated['track_temp_c'] : null,
-                (bool) ($validated['only_team'] ?? false)
+                (string) ($validated['car_name'] ?? ''),
+                isset($validated['track_temp_c']) && $validated['track_temp_c'] !== '' ? (float) $validated['track_temp_c'] : null,
+                (bool) ($validated['only_team'] ?? false),
+                ! empty($validated['g61_track_id']) ? (int) $validated['g61_track_id'] : null,
+                ! empty($validated['g61_car_id']) ? (int) $validated['g61_car_id'] : null,
             );
         } catch (RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);

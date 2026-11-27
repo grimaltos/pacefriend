@@ -8,6 +8,7 @@ use App\Models\Track;
 use App\Models\User;
 use App\Services\Telemetry\TelemetryNormalizerService;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class Garage61ImporterService
@@ -20,7 +21,7 @@ class Garage61ImporterService
 
     /**
      * Option A (Part 1): Import one or multiple Garage 61 laps from a pasted Lap URL,
-     * Analysis URL, or list of lap IDs.
+     * Analysis URL, or raw ID (automatically trying /analyses/{id} if /laps/{id} fails on raw IDs).
      *
      * @return array<int, ReferenceLap>
      */
@@ -30,7 +31,25 @@ class Garage61ImporterService
         $lapIds = $this->client->extractLapIds($token, $input);
 
         if ($lapIds === []) {
-            throw new RuntimeException('No se pudo identificar ningún ID de vuelta válido en el enlace o texto introducido.');
+            throw new RuntimeException('No se pudo identificar ningún ID válido en el enlace o texto introducido.');
+        }
+
+        // If user pasted a single raw ULID without URL path, check if it's actually an Analysis ID first if getLap fails
+        if (count($lapIds) === 1 && ! str_contains($input, '/laps/')) {
+            try {
+                return [$this->importSingleLap($user, $lapIds[0], 'garage61_manual')];
+            } catch (RuntimeException $lapErr) {
+                try {
+                    $fromAnalysis = $this->client->resolveAnalysisLapIds($token, $lapIds[0]);
+                    if ($fromAnalysis !== []) {
+                        $lapIds = $fromAnalysis;
+                    } else {
+                        throw $lapErr;
+                    }
+                } catch (RuntimeException) {
+                    throw $lapErr;
+                }
+            }
         }
 
         $imported = [];
@@ -42,42 +61,65 @@ class Garage61ImporterService
     }
 
     /**
-     * Option A (Part 2): Search Garage 61 laps directly from the PaceFriend panel.
+     * Option A (Part 2): Search Garage 61 laps directly from the PaceFriend panel
+     * using official OpenAPI parameters (tracks, cars, minConditionsTrackTemp, teams by slug).
      *
      * @return array<int, array<string, mixed>>
      */
     public function searchForPanel(
         User $user,
-        Track $track,
+        ?Track $track,
         string $carName,
         ?float $trackTempC = null,
-        bool $onlyTeam = false
+        bool $onlyTeam = false,
+        ?int $explicitG61TrackId = null,
+        ?int $explicitG61CarId = null
     ): array {
         $token = $this->requireUserToken($user);
-        $ids = $this->client->resolveTrackAndCarIds($token, $track, $carName);
+
+        $g61TrackId = $explicitG61TrackId;
+        $g61CarId = $explicitG61CarId;
+
+        if (($g61TrackId === null || $g61CarId === null) && $track !== null) {
+            $resolved = $this->client->resolveTrackAndCarIds($token, $track, $carName);
+            $g61TrackId ??= $resolved['track_id'];
+            $g61CarId ??= $resolved['car_id'];
+        }
 
         $query = [];
-        if ($ids['track_id'] !== null) {
-            $query['tracks'] = (string) $ids['track_id'];
+        if ($g61TrackId !== null) {
+            $query['tracks'] = (string) $g61TrackId;
         }
-        if ($ids['car_id'] !== null) {
-            $query['cars'] = (string) $ids['car_id'];
+        if ($g61CarId !== null) {
+            $query['cars'] = (string) $g61CarId;
         }
         if ($trackTempC !== null) {
-            $query['minTrackTemp'] = round($trackTempC - 3.0, 1);
-            $query['maxTrackTemp'] = round($trackTempC + 3.0, 1);
+            $query['minConditionsTrackTemp'] = round($trackTempC - 4.0, 1);
+            $query['maxConditionsTrackTemp'] = round($trackTempC + 4.0, 1);
         }
         if ($onlyTeam) {
             $teams = $this->client->listTeams($token);
-            $teamIds = array_filter(array_map(static fn (array $t) => $t['id'] ?? null, $teams));
-            if ($teamIds !== []) {
-                $query['teams'] = implode(',', $teamIds);
+            // OpenAPI line 698: `teams` expects team SLUGS, not IDs!
+            $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
+            if ($teamSlugs !== []) {
+                $query['teams'] = implode(',', $teamSlugs);
+            }
+        } else {
+            // Include user's own laps, followed drivers, AND all joined team slugs!
+            $teams = $this->client->listTeams($token);
+            $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
+            $query['drivers'] = 'me,following';
+            if ($teamSlugs !== []) {
+                $query['teams'] = implode(',', $teamSlugs);
             }
         }
 
         $laps = $this->client->searchLaps($token, $query);
 
-        return array_map(fn (array $lap) => $this->normalizeLapMeta($lap, $track->name, $carName), $laps);
+        return array_map(
+            fn (array $lap) => $this->normalizeLapMeta($lap, $track?->name ?? '', $carName),
+            $laps
+        );
     }
 
     /**
@@ -146,8 +188,6 @@ class Garage61ImporterService
 
     /**
      * Option C: Progressive Autopilot in real time.
-     * Triggered asynchronously when a driver has no thermal-matched reference (±2.5 °C)
-     * OR has already caught up to their current reference lap and is ready for the next ~1.0s step.
      */
     public function syncAutopilotForSession(DrivingSession $session, int $driverCleanPaceMs): ?ReferenceLap
     {
@@ -178,23 +218,26 @@ class Garage61ImporterService
         try {
             $token = (string) $user->garage61_token;
             $ids = $this->client->resolveTrackAndCarIds($token, $session->track, $session->car_name);
+            if ($ids['track_id'] === null) {
+                return null;
+            }
+
+            $teams = $this->client->listTeams($token);
+            $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
 
             $query = [
-                'minTrackTemp' => round($session->avg_track_temp_c - $tempBand, 1),
-                'maxTrackTemp' => round($session->avg_track_temp_c + $tempBand, 1),
+                'tracks' => (string) $ids['track_id'],
+                'minConditionsTrackTemp' => round($session->avg_track_temp_c - $tempBand, 1),
+                'maxConditionsTrackTemp' => round($session->avg_track_temp_c + $tempBand, 1),
             ];
-            if ($ids['track_id'] !== null) {
-                $query['tracks'] = (string) $ids['track_id'];
-            }
             if ($ids['car_id'] !== null) {
                 $query['cars'] = (string) $ids['car_id'];
             }
-            if ($user->autopilot_mode === 'team') {
-                $teams = $this->client->listTeams($token);
-                $teamIds = array_filter(array_map(static fn (array $t) => $t['id'] ?? null, $teams));
-                if ($teamIds !== []) {
-                    $query['teams'] = implode(',', $teamIds);
-                }
+            if ($teamSlugs !== []) {
+                $query['teams'] = implode(',', $teamSlugs);
+            }
+            if ($user->autopilot_mode !== 'team') {
+                $query['drivers'] = 'me,following';
             }
 
             $candidates = $this->client->searchLaps($token, $query);
@@ -236,8 +279,6 @@ class Garage61ImporterService
     }
 
     /**
-     * Select either a progressive ~1.0s step-up lap or absolute fastest lap among G61 candidates.
-     *
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<string, mixed>|null
      */
@@ -264,7 +305,6 @@ class Garage61ImporterService
             $minFaster = $driverPaceMs - (int) config('pacefriend.garage61.progressive_max_faster_ms', 1600);
             $maxFaster = $driverPaceMs - (int) config('pacefriend.garage61.progressive_min_faster_ms', 600);
 
-            // 1. Prefer candidates strictly inside the progressive learning window [driver - 1.6s, driver - 0.6s]
             $inWindow = array_values(array_filter(
                 $parsed,
                 static fn (array $item) => $item['_meta']['lap_time_ms'] >= $minFaster && $item['_meta']['lap_time_ms'] <= $maxFaster
@@ -280,7 +320,6 @@ class Garage61ImporterService
                 return $inWindow[0];
             }
 
-            // 2. Fallback: closest lap that is still faster than the driver
             $faster = array_values(array_filter(
                 $parsed,
                 static fn (array $item) => $item['_meta']['lap_time_ms'] < ($driverPaceMs - 200)
@@ -291,15 +330,12 @@ class Garage61ImporterService
             }
         }
 
-        // Alien / Team mode (or driver already faster than window): fastest clean lap at matching temp
         usort($parsed, static fn (array $a, array $b) => $a['_meta']['lap_time_ms'] <=> $b['_meta']['lap_time_ms']);
 
         return $parsed[0];
     }
 
     /**
-     * Normalize varying Garage 61 JSON shapes (seconds vs ms, nested track/car/driver objects).
-     *
      * @param  array<string, mixed>  $lap
      * @return array{
      *   id: string,
@@ -316,7 +352,6 @@ class Garage61ImporterService
     private function normalizeLapMeta(array $lap, string $fallbackTrack, string $fallbackCar): array
     {
         $rawTime = $lap['lapTime'] ?? $lap['lap_time'] ?? $lap['time'] ?? 0;
-        // Garage 61 API returns lapTime in seconds (float, e.g. 137.452)
         $lapTimeMs = ($rawTime > 0 && $rawTime < 2000)
             ? (int) round(((float) $rawTime) * 1000.0)
             : (int) $rawTime;
@@ -333,7 +368,7 @@ class Garage61ImporterService
         if (is_array($lap['driver'] ?? null)) {
             $driverName = trim(($lap['driver']['firstName'] ?? '').' '.($lap['driver']['lastName'] ?? ''));
             if ($driverName === '') {
-                $driverName = (string) ($lap['driver']['nickName'] ?? $lap['driver']['name'] ?? '');
+                $driverName = (string) ($lap['driver']['nickName'] ?? $lap['driver']['slug'] ?? '');
             }
         } else {
             $driverName = (string) ($lap['driverName'] ?? '');
@@ -341,7 +376,9 @@ class Garage61ImporterService
 
         $trackTemp = (float) ($lap['trackTemp'] ?? $lap['track_temp_c'] ?? 26.0);
         $airTemp = (float) ($lap['airTemp'] ?? $lap['air_temp_c'] ?? 20.0);
-        $isWet = (bool) ($lap['trackWetness'] ?? $lap['wet'] ?? $lap['is_wet'] ?? false);
+        // OpenAPI line 2521: trackWetness is percentage 0..100 (0 = dry, 100 = fully wet)
+        $wetnessPct = (int) ($lap['trackWetness'] ?? 0);
+        $isWet = $wetnessPct >= 5 || (bool) ($lap['is_wet'] ?? false);
 
         return [
             'id' => (string) ($lap['id'] ?? ''),
@@ -351,7 +388,7 @@ class Garage61ImporterService
             'is_wet' => $isWet,
             'driver_name' => $driverName,
             'track_name' => $trackName !== '' ? $trackName : $fallbackTrack,
-            'track_slug' => \Illuminate\Support\Str::slug($trackName !== '' ? $trackName : $fallbackTrack),
+            'track_slug' => Str::slug($trackName !== '' ? $trackName : $fallbackTrack),
             'car_name' => $carName !== '' ? $carName : $fallbackCar,
         ];
     }

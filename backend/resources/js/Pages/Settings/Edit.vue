@@ -112,9 +112,22 @@ function revoke(id) {
                         {{ profile.garage61_connected ? 'Token Conectado' : 'Sin Conectar' }}
                     </span>
                 </div>
-                <p class="text-xs text-zinc-400 mb-5">
+                <p class="text-xs text-zinc-400 mb-4">
                     Conecta tu Personal Access Token de <code class="text-zinc-200">garage61.net/developer</code> para importar análisis/vueltas o activar el Autopilot térmico en pista.
                 </p>
+
+                <div v-if="profile.garage61_status" class="mb-4 rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 text-xs space-y-1">
+                    <div v-if="profile.garage61_status.error" class="text-rose-400">{{ profile.garage61_status.error }}</div>
+                    <template v-else>
+                        <div class="text-zinc-300">Piloto G61: <strong class="text-white">{{ profile.garage61_status.driver }}</strong> · Plan: <span class="uppercase text-emerald-400">{{ profile.garage61_status.plan }}</span></div>
+                        <div class="text-zinc-400">Equipos: <span class="text-zinc-200">{{ profile.garage61_status.teams?.join(', ') || 'Ninguno' }}</span></div>
+                        <div class="text-zinc-400">
+                            Permisos activos en token:
+                            <span v-if="profile.garage61_status.permissions?.length" class="font-mono text-emerald-300">{{ profile.garage61_status.permissions.join(', ') }}</span>
+                            <span v-else class="text-amber-300 font-medium">Solo lectura básica (pendiente que Garage 61 active driving_data / analyses)</span>
+                        </div>
+                    </template>
+                </div>
 
                 <form @submit.prevent="saveGarage61" class="space-y-4">
                     <div>

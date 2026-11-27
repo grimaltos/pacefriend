@@ -8,6 +8,9 @@ const props = defineProps({
     references: Array,
     tracks: Array,
     garage61Connected: Boolean,
+    g61Tracks: Array,
+    g61Cars: Array,
+    g61Analyses: Array,
 });
 
 const uploadForm = useForm({
@@ -27,11 +30,13 @@ const g61UrlForm = useForm({
     g61_input: '',
 });
 
-const searchTrackId = ref(props.tracks?.[0]?.id || '');
-const searchCarName = ref('Porsche 911 GT3 R (992)');
-const searchTemp = ref('28');
+const selectedG61TrackId = ref(props.g61Tracks?.[0]?.id || '');
+const selectedG61CarId = ref('');
+const targetLocalTrackId = ref(props.tracks?.[0]?.id || '');
+const searchTemp = ref('');
 const searchOnlyTeam = ref(false);
 const searchingG61 = ref(false);
+const searchExecuted = ref(false);
 const g61Results = ref([]);
 const g61SearchError = ref('');
 
@@ -60,15 +65,28 @@ function submitG61Url() {
     });
 }
 
+function importSavedAnalysis(analysisId) {
+    g61UrlForm.g61_input = `https://garage61.net/app/analyses/${analysisId}`;
+    submitG61Url();
+}
+
 async function runG61Search() {
     searchingG61.value = true;
+    searchExecuted.value = false;
     g61SearchError.value = '';
     try {
         const params = new URLSearchParams({
-            track_id: searchTrackId.value,
-            car_name: searchCarName.value,
             only_team: searchOnlyTeam.value ? '1' : '0',
         });
+        if (selectedG61TrackId.value) {
+            params.set('g61_track_id', selectedG61TrackId.value);
+        }
+        if (selectedG61CarId.value) {
+            params.set('g61_car_id', selectedG61CarId.value);
+        }
+        if (targetLocalTrackId.value) {
+            params.set('track_id', targetLocalTrackId.value);
+        }
         if (searchTemp.value !== '') {
             params.set('track_temp_c', searchTemp.value);
         }
@@ -76,6 +94,7 @@ async function runG61Search() {
             headers: { Accept: 'application/json' },
         });
         const data = await resp.json();
+        searchExecuted.value = true;
         if (!resp.ok) {
             g61SearchError.value = data.message || 'No se pudo consultar Garage 61.';
             g61Results.value = [];
@@ -92,8 +111,8 @@ async function runG61Search() {
 function importFoundLap(item) {
     router.post('/references/garage61/import-lap', {
         lap_id: item.id,
-        track_id: searchTrackId.value,
-        car_name: searchCarName.value,
+        track_id: targetLocalTrackId.value || null,
+        car_name: item.car_name || null,
     });
 }
 
@@ -111,7 +130,7 @@ function removeRef(id) {
             <p class="text-xs uppercase tracking-widest text-emerald-400 font-semibold mb-1">Emparejamiento Térmico + Garage 61</p>
             <h1 class="text-2xl sm:text-3xl font-bold text-white">Biblioteca de Vueltas de Referencia</h1>
             <p class="text-sm text-zinc-400 mt-1">
-                Importa vueltas o análisis desde <strong>Garage 61</strong>, sube archivos <code class="text-zinc-200">.ibt</code>/<code class="text-zinc-200">.json</code> o deja que el <strong>Autopilot Progresivo</strong> las descargue mientras conduces.
+                Importa vueltas propias o de tu equipo desde la API de <strong>Garage 61</strong>, o sube cualquier <code class="text-zinc-200">.csv</code> exportado desde su web (ideal para vueltas públicas de pilotos externos) y archivos <code class="text-zinc-200">.ibt</code>.
             </p>
         </div>
 
@@ -119,62 +138,89 @@ function removeRef(id) {
         <div class="mb-8 rounded-2xl bg-zinc-900 border border-zinc-800 p-6">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                 <div>
-                    <h2 class="text-lg font-semibold text-white">Importador Directo de Garage 61</h2>
-                    <p class="text-xs text-zinc-400">Pega el enlace de una vuelta o análisis compartido de Garage 61, o busca vueltas con telemetría abierta por temperatura.</p>
+                    <h2 class="text-lg font-semibold text-white">Importador API de Garage 61 (Tus vueltas y Equipo F·R·I·E·N·D·S)</h2>
+                    <p class="text-xs text-zinc-400">
+                        Nota de permisos API G61: el token personal accede a tus vueltas, análisis y compañeros de equipo. Para vueltas públicas de pilotos ajenos a tu equipo, descárgalas como <strong>CSV</strong> en la web de G61 y súbelas abajo a la izquierda.
+                    </p>
                 </div>
                 <Link v-if="!garage61Connected" href="/settings" class="text-xs px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 font-medium">
                     Conectar Token de Garage 61 →
                 </Link>
             </div>
 
-            <form @submit.prevent="submitG61Url" class="flex flex-col sm:flex-row gap-3 mb-6">
+            <form @submit.prevent="submitG61Url" class="flex flex-col sm:flex-row gap-3 mb-4">
                 <input
                     v-model="g61UrlForm.g61_input"
                     type="text"
                     required
-                    placeholder="Pega enlace https://garage61.net/app/laps/... o URL de análisis (?laps=id1,id2) o ID directo"
+                    placeholder="Pega enlace de vuelta propia/equipo, enlace de análisis (/app/analyses/...) o ID"
                     class="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500"
                 />
                 <button type="submit" :disabled="g61UrlForm.processing || !garage61Connected" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-zinc-950 font-semibold text-sm cursor-pointer">
                     Importar Enlace / Análisis
                 </button>
             </form>
-            <p v-if="g61UrlForm.errors.g61_input" class="text-xs text-rose-400 -mt-4 mb-4">{{ g61UrlForm.errors.g61_input }}</p>
+            <p v-if="g61UrlForm.errors.g61_input" class="text-xs text-rose-400 mb-4 leading-relaxed">{{ g61UrlForm.errors.g61_input }}</p>
 
-            <!-- Interactive Search -->
+            <!-- Saved Analyses Quick List -->
+            <div v-if="g61Analyses?.length" class="mb-5 flex flex-wrap items-center gap-2 text-xs">
+                <span class="text-zinc-400">Tus análisis recientes en G61:</span>
+                <button
+                    v-for="an in g61Analyses.slice(0, 6)"
+                    :key="an.id"
+                    type="button"
+                    @click="importSavedAnalysis(an.id)"
+                    class="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-emerald-300 font-mono cursor-pointer"
+                >
+                    + Análisis {{ an.id.slice(0, 8) }}…
+                </button>
+            </div>
+
+            <!-- Interactive Official OpenAPI Search -->
             <div class="border-t border-zinc-800 pt-5">
-                <div class="grid sm:grid-cols-4 gap-3 items-end">
-                    <div>
-                        <label class="block text-xs text-zinc-400 mb-1">Circuito Curado</label>
-                        <select v-model="searchTrackId" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white">
+                <div class="grid sm:grid-cols-5 gap-3 items-end">
+                    <div class="sm:col-span-2">
+                        <label class="block text-xs text-zinc-400 mb-1">Circuito en Garage 61</label>
+                        <select v-if="g61Tracks?.length" v-model="selectedG61TrackId" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white">
+                            <option v-for="gt in g61Tracks" :key="gt.id" :value="gt.id">{{ gt.label }}</option>
+                        </select>
+                        <select v-else v-model="targetLocalTrackId" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white">
                             <option v-for="t in tracks" :key="t.id" :value="t.id">{{ t.name }}</option>
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-zinc-400 mb-1">Coche iRacing</label>
-                        <input v-model="searchCarName" type="text" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white" />
+                        <label class="block text-xs text-zinc-400 mb-1">Coche en G61 (opc.)</label>
+                        <select v-model="selectedG61CarId" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white">
+                            <option value="">Todos los coches</option>
+                            <option v-for="gc in g61Cars" :key="gc.id" :value="gc.id">{{ gc.name }}</option>
+                        </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-zinc-400 mb-1">Asfalto objetivo °C (±3 °C)</label>
-                        <input v-model="searchTemp" type="number" step="0.5" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white" />
+                        <label class="block text-xs text-zinc-400 mb-1">Asfalto °C (opc., ±4 °C)</label>
+                        <input v-model="searchTemp" type="number" step="0.5" placeholder="Cualquiera" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white" />
                     </div>
                     <div class="flex items-center gap-3">
                         <label class="flex items-center gap-1.5 text-xs text-zinc-300 cursor-pointer">
                             <input v-model="searchOnlyTeam" type="checkbox" class="rounded bg-zinc-950 border-zinc-700" />
-                            Equipo
+                            Solo Equipo
                         </label>
                         <button type="button" @click="runG61Search" :disabled="searchingG61 || !garage61Connected" class="flex-1 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-xs font-semibold text-white cursor-pointer">
-                            {{ searchingG61 ? 'Buscando...' : 'Buscar en G61' }}
+                            {{ searchingG61 ? 'Buscando...' : 'Buscar' }}
                         </button>
                     </div>
                 </div>
 
-                <p v-if="g61SearchError" class="text-xs text-rose-400 mt-3">{{ g61SearchError }}</p>
+                <p v-if="g61SearchError" class="text-xs text-rose-400 mt-3 leading-relaxed">{{ g61SearchError }}</p>
 
-                <div v-if="g61Results.length" class="mt-4 divide-y divide-zinc-800 rounded-xl border border-zinc-800 bg-zinc-950/60">
-                    <div v-for="item in g61Results" :key="item.id" class="px-4 py-3 flex items-center justify-between text-xs">
+                <div v-else-if="searchExecuted && !g61Results.length" class="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs text-zinc-400">
+                    No se encontraron vueltas limpias tuyas o de tu equipo para esa combinación (recuerda dejar temperatura vacía si quieres ver cualquier condición).
+                </div>
+
+                <div v-if="g61Results.length" class="mt-4 divide-y divide-zinc-800 rounded-xl border border-zinc-800 bg-zinc-950/60 max-h-80 overflow-y-auto">
+                    <div v-for="item in g61Results" :key="item.id" class="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                         <div>
                             <span class="font-semibold text-white">{{ item.driver_name || item.id }}</span>
+                            <span class="text-emerald-400 ml-2">{{ item.car_name }}</span>
                             <span class="text-zinc-400 ml-2">· Asfalto {{ item.track_temp_c }} °C · Aire {{ item.air_temp_c }} °C</span>
                         </div>
                         <div class="flex items-center gap-4">
@@ -191,7 +237,7 @@ function removeRef(id) {
         <div class="grid lg:grid-cols-3 gap-6">
             <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6 h-fit">
                 <h2 class="font-semibold text-white mb-1">Subir Archivo (.ibt, .csv G61 o .json)</h2>
-                <p class="text-xs text-zinc-400 mb-4">Sube el CSV exportado desde la web de Garage 61 o un archivo <code class="text-zinc-200">.ibt</code> nativo de iRacing.</p>
+                <p class="text-xs text-zinc-400 mb-4">Ideal para vueltas públicas de cualquier piloto en G61 (botón <em>Export CSV</em>) o archivos <code class="text-zinc-200">.ibt</code> locales.</p>
 
                 <form @submit.prevent="submitUpload" class="space-y-4">
                     <div>
@@ -223,7 +269,7 @@ function removeRef(id) {
 
                     <div>
                         <label class="block text-xs font-medium text-zinc-300 mb-1">Etiqueta identificativa (opcional)</label>
-                        <input v-model="uploadForm.label" type="text" placeholder="Ej. Setup Qualy Tarde Calurosa" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" />
+                        <input v-model="uploadForm.label" type="text" placeholder="Ej. Referencia Alien G61 30°C" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" />
                     </div>
 
                     <div class="grid grid-cols-2 gap-3">
@@ -262,7 +308,7 @@ function removeRef(id) {
                                     G61 Autopilot
                                 </span>
                                 <span v-else-if="ref.source === 'garage61_manual' || ref.source === 'g61_csv_upload'" class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                    {{ ref.source === 'g61_csv_upload' ? 'G61 CSV' : 'G61 Importada' }}
+                                    {{ ref.source === 'g61_csv_upload' ? 'G61 CSV' : 'G61 API' }}
                                 </span>
                                 <span v-else :class="ref.is_owned ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'" class="text-[11px] px-2 py-0.5 rounded-full border">
                                     {{ ref.is_owned ? 'Propia' : 'Base' }}

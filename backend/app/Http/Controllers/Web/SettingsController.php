@@ -12,9 +12,24 @@ use RuntimeException;
 
 class SettingsController extends Controller
 {
-    public function edit(Request $request): Response
+    public function edit(Request $request, Garage61ClientService $g61Client): Response
     {
         $user = $request->user();
+        $g61Status = null;
+
+        if (filled($user->garage61_token)) {
+            try {
+                $me = $g61Client->me((string) $user->garage61_token);
+                $g61Status = [
+                    'driver' => trim(($me['firstName'] ?? '').' '.($me['lastName'] ?? '')) ?: ($me['slug'] ?? ''),
+                    'plan' => $me['subscriptionPlan'] ?? 'free',
+                    'permissions' => $me['apiPermissions'] ?? [],
+                    'teams' => array_map(static fn (array $t) => $t['name'] ?? $t['slug'] ?? '', $me['teams'] ?? []),
+                ];
+            } catch (RuntimeException $e) {
+                $g61Status = ['error' => $e->getMessage()];
+            }
+        }
 
         return Inertia::render('Settings/Edit', [
             'profile' => [
@@ -25,6 +40,7 @@ class SettingsController extends Controller
                 'callsign_phonetic' => $user->callsign_phonetic,
                 'preferences' => $user->preferences ?? [],
                 'garage61_connected' => filled($user->garage61_token),
+                'garage61_status' => $g61Status,
                 'autopilot_enabled' => (bool) $user->autopilot_enabled,
                 'autopilot_mode' => $user->autopilot_mode ?: 'progressive',
                 'autopilot_delta_ms' => $user->autopilot_delta_ms ?: 1000,

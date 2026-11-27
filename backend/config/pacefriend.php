@@ -21,6 +21,7 @@ return [
         'track_temp_weight' => 0.75,
         'air_temp_weight' => 0.25,
         'thermal_band_c' => 3.0,
+        'max_comparable_temp_delta_c' => (float) env('PACEFRIEND_MAX_TEMP_DELTA_C', 7.0),
     ],
 
     /*

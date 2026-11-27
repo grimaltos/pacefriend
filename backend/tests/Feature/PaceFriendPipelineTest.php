@@ -406,6 +406,82 @@ class PaceFriendPipelineTest extends TestCase
         $this->assertGreaterThanOrEqual(4, count($map['driver_points']));
     }
 
+    public function test_incomparable_reference_switches_to_session_self_coaching_and_detects_abs_and_brake_drag(): void
+    {
+        $user = User::factory()->create([
+            'name' => 'Vicent Grimaltos',
+            'driver_callsign' => 'Vicent',
+            'preferences' => ['min_clean_laps' => 2],
+        ]);
+        $token = $user->createToken('SimRig')->plainTextToken;
+
+        // 1. Track is scorching at 43.5 °C (closest Spa reference is 33.0 °C -> ΔT = 10.5 °C > 7 °C limit!)
+        $brief = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/briefing', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 9801,
+                'sub_session_id' => 9901,
+                'track_temp_c' => 43.5,
+                'air_temp_c' => 31.0,
+                'is_wet' => false,
+                'reason' => 'session_start',
+            ]);
+        $brief->assertOk();
+        $this->assertNull($brief->json('matched_reference_lap_id'));
+        $this->assertStringContainsString('no ser comparable', $brief->json('radio_callouts.0.text'));
+
+        // 2. Drive 2 clean laps at 43.5 °C with NO external reference, abusing ABS in Turn 1 (flags=8)
+        // and dragging 3% left-foot brake at full throttle on Kemmel straight!
+        $lastResp = null;
+        for ($lapNum = 1; $lapNum <= 2; $lapNum++) {
+            $samples = $this->buildGeoTrajectorySamples(141000, narrowEntryTurn5Meters: 0.0, lateThrottleTurn5: false);
+            foreach ($samples as &$s) {
+                // Heavy ABS active across Turn 1 La Source braking zone
+                if (($s['pct'] >= 0.965 || $s['pct'] <= 0.015) && $s['brake'] < 0.25) {
+                    $s['brake'] = 0.92;
+                }
+                if ($s['pct'] >= 0.965 || $s['pct'] <= 0.015) {
+                    $s['flags'] = 8; // FlagABSActive (not dirty!)
+                }
+                // Left-foot 3% brake drag on Kemmel straight (0.12 .. 0.22)
+                if ($s['pct'] >= 0.12 && $s['pct'] <= 0.22) {
+                    $s['throttle'] = 1.0;
+                    $s['brake'] = 0.035;
+                    $s['speed'] = 71.0;
+                }
+            }
+            unset($s);
+
+            $lastResp = $this->withHeader('Authorization', "Bearer {$token}")
+                ->postJson('/api/v1/telemetry/lap', [
+                    'track_slug' => 'spa-up',
+                    'car_name' => 'Porsche 911 GT3 R (992)',
+                    'session_id' => 9801,
+                    'sub_session_id' => 9901,
+                    'lap_number' => $lapNum,
+                    'lap_time_ms' => 141000,
+                    'is_clean' => true,
+                    'track_temp_c' => 43.5,
+                    'air_temp_c' => 31.0,
+                    'samples' => $samples,
+                ]);
+            $lastResp->assertCreated();
+            if ($lapNum === 1) {
+                $callouts1 = implode(' | ', array_column($lastResp->json('radio_callouts'), 'text'));
+                $this->assertStringContainsString('rozando el freno en recta', $callouts1);
+            }
+        }
+
+        // Verify Self-Reference mode activated WITHOUT external reference and caught ABS abuse!
+        $this->assertNull($lastResp->json('matched_reference_lap_id'));
+        $plan = $lastResp->json('coaching_plan');
+        $this->assertNotNull($plan);
+        $this->assertSame('session_self', $plan['reference_mode']);
+        $this->assertSame('abs_abuse', $plan['primary_issue']);
+        $this->assertStringContainsString('ABS', $plan['triggers'][0]['text']);
+    }
+
     /**
      * Build synthetic Spa telemetry with realistic 64-bit Lat/Lon heading right at Turn 5 (Les Combes, pct ~ 0.28..0.33).
      *

@@ -209,7 +209,7 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 	}
 	r.prevIncidents = frame.IncidentCount
 
-	if frame.Sample.Flags&(telemetry.FlagOffTrack|telemetry.FlagOnPitRoad|telemetry.FlagIncident) != 0 {
+	if frame.Sample.Flags&telemetry.FlagsDirtyMask != 0 {
 		r.lapDirty = true
 		r.secHadDirty = true
 		r.lastDirtyCum = float64(currLap) + float64(currPct)

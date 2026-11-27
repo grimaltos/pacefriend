@@ -163,6 +163,15 @@ class IbtFileParserService
                 continue;
             }
 
+            $sampleFlags = 0;
+            if (isset($vars['BrakeABSactive']) && (bool) $this->readScalar($bytes, $rowOffset, $vars['BrakeABSactive'])) {
+                $sampleFlags |= 8; // FlagABSActive
+            }
+            if ((isset($vars['TireLF_RumblePitch']) && (float) $this->readScalar($bytes, $rowOffset, $vars['TireLF_RumblePitch']) > 1.0)
+                || (isset($vars['TireRF_RumblePitch']) && (float) $this->readScalar($bytes, $rowOffset, $vars['TireRF_RumblePitch']) > 1.0)) {
+                $sampleFlags |= 16; // FlagCurbStrike
+            }
+
             $relMs = (int) round(max(0.0, $sessionTime - $laps[$lapNum]['start_time']) * 1000.0);
             $sampleItem = [
                 't_ms' => $relMs,
@@ -172,7 +181,7 @@ class IbtFileParserService
                 'brake' => round((float) $this->readScalar($bytes, $rowOffset, $vars['Brake']), 3),
                 'lap' => $lapNum,
                 'gear' => isset($vars['Gear']) ? (int) $this->readScalar($bytes, $rowOffset, $vars['Gear']) : 3,
-                'flags' => 0,
+                'flags' => $sampleFlags,
             ];
             if (isset($vars['Lat'], $vars['Lon'])) {
                 $latV = (float) $this->readScalar($bytes, $rowOffset, $vars['Lat']);

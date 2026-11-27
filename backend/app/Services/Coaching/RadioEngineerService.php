@@ -29,7 +29,9 @@ class RadioEngineerService
         bool $isWet,
         ?float $fuelLevelL,
         ?ReferenceLap $referenceLap,
-        string $reason = 'session_start'
+        string $reason = 'session_start',
+        ?string $discardedReason = null,
+        ?ReferenceLap $discardedRef = null
     ): array {
         $radio = $user->radioSettings();
         $callsign = $user->spokenCallsign();
@@ -39,10 +41,12 @@ class RadioEngineerService
 
         if ($reason === 'conditions_changed') {
             $parts = [
-                "Atento {$callsign}, cambian las condiciones en pista: ahora {$surface} a {$tTrack} grados.",
+                "Atento {$callsign}, cambian las condiciones: pista {$surface} a {$tTrack} grados.",
             ];
             if ($referenceLap !== null) {
                 $parts[] = "Ajustamos referencia a {$this->spokenLapTime($referenceLap->lap_time_ms)}.";
+            } elseif ($discardedReason !== null) {
+                $parts[] = 'La referencia anterior ya no es comparable; entrenamos sobre tus parciales de hoy.';
             }
 
             return [$this->makeCallout('briefing_weather_'.substr(md5(implode(' ', $parts)), 0, 8), implode(' ', $parts), $radio)];
@@ -76,8 +80,16 @@ class RadioEngineerService
                     $parts[] = "Vas {$lighter} litros más ligero que la referencia.";
                 }
             }
+        } elseif ($discardedReason === 'temp_mismatch' && $discardedRef !== null) {
+            $refTemp = (int) round($discardedRef->track_temp_c);
+            $parts[] = "Descartamos tu referencia de {$refTemp} grados por no ser comparable; mejoramos sobre tus parciales de esta sesión.";
+        } elseif ($discardedReason === 'surface_mismatch' && $discardedRef !== null) {
+            $refSurf = $discardedRef->is_wet ? 'mojado' : 'seco';
+            $parts[] = "Descartamos referencia en {$refSurf} por no ser comparable; trabajamos con tus parciales de hoy.";
         } elseif ($user->autopilot_enabled && filled($user->garage61_token)) {
-            $parts[] = 'Completa una vuelta limpia y te cargo objetivo automático de Garage 61.';
+            $parts[] = 'Completa una vuelta limpia para buscar target en Garage 61 o entrenamos sobre tus propios parciales.';
+        } else {
+            $parts[] = 'Sin referencia externa; construimos tu vuelta óptima sobre tus parciales de hoy.';
         }
 
         if ($radio['tyre_temp_alerts']) {
@@ -166,7 +178,8 @@ class RadioEngineerService
         ?ReferenceLap $previousRef,
         ?ReferenceLap $currentRef,
         ?float $avgFuelUsedL,
-        array &$radioFlags
+        array &$radioFlags,
+        int $straightBrakeDragMs = 0
     ): array {
         $radio = $user->radioSettings();
         $callsign = $user->spokenCallsign();
@@ -235,6 +248,16 @@ class RadioEngineerService
             if ($lapSpeech !== '') {
                 $callouts[] = $this->makeCallout("lap_{$lap->lap_number}_summary", $lapSpeech, $radio);
             }
+        }
+
+        // Left-foot involuntary brake drag warning on straights
+        if ($straightBrakeDragMs >= 500 && empty($radioFlags['brake_drag_warned'])) {
+            $radioFlags['brake_drag_warned'] = true;
+            $callouts[] = $this->makeCallout(
+                "brake_drag_lap_{$lap->lap_number}",
+                "¡Ojo {$callsign}! Llevas el pie izquierdo rozando el freno en recta.",
+                $radio
+            );
         }
 
         // Fuel reserve & target consumption comparison

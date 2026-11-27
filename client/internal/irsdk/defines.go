@@ -160,11 +160,14 @@ type VarIndex struct {
 	LapDistPct varSlot
 	Gear       varSlot
 
-	// Racing line & chassis rotation channels (64-bit world Lat/Lon + steering/yaw)
+	// Racing line & chassis rotation channels (64-bit world Lat/Lon + steering/yaw + ABS/kerbs)
 	Lat                varSlot
 	Lon                varSlot
 	SteeringWheelAngle varSlot
 	YawRate            varSlot
+	BrakeABSactive     varSlot
+	TireLFRumblePitch  varSlot
+	TireRFRumblePitch  varSlot
 
 	// Optional enrichment variables for exact lap timing, cleanliness & weather matching
 	SessionTime              varSlot
@@ -246,6 +249,12 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.SteeringWheelAngle = slot
 		case "YawRate":
 			idx.YawRate = slot
+		case "BrakeABSactive":
+			idx.BrakeABSactive = slot
+		case "TireLF_RumblePitch":
+			idx.TireLFRumblePitch = slot
+		case "TireRF_RumblePitch":
+			idx.TireRFRumblePitch = slot
 		case "SessionTime":
 			idx.SessionTime = slot
 		case "LapLastLapTime":
@@ -404,6 +413,13 @@ func ReadFrameFromMemory(mem []byte, idx *VarIndex, out *telemetry.RawFrame) (bo
 		}
 		if idx.OnPitRoad.present && readBool(row, idx.OnPitRoad) {
 			flags |= telemetry.FlagOnPitRoad
+		}
+		if idx.BrakeABSactive.present && readBool(row, idx.BrakeABSactive) {
+			flags |= telemetry.FlagABSActive
+		}
+		if (idx.TireLFRumblePitch.present && readFloat32(row, idx.TireLFRumblePitch) > 1.0) ||
+			(idx.TireRFRumblePitch.present && readFloat32(row, idx.TireRFRumblePitch) > 1.0) {
+			flags |= telemetry.FlagCurbStrike
 		}
 		out.Sample.Flags = flags
 

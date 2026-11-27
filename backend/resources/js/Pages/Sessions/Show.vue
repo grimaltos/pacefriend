@@ -6,21 +6,58 @@ import { formatDeltaMs, formatLapTime, renderMarkdown } from '../../Utils/format
 
 const props = defineProps({
     session: Object,
-    focusTrajectoryMap: Object,
+    trajectorySuite: Object,
 });
 
 const generating = ref(false);
+const selectedMapKey = ref(
+    props.session.active_coaching_plan?.focus_turn
+        ? `turn_${props.session.active_coaching_plan.focus_turn}`
+        : 'circuit'
+);
 
 const activeTriggers = computed(() => props.session.active_coaching_plan?.triggers || []);
 const breakdown = computed(() => props.session.active_coaching_plan?.telemetry_breakdown || null);
+const isSelfRefMode = computed(() => !props.session.active_reference_lap || props.session.active_coaching_plan?.reference_mode === 'session_self');
+
+const activeMapData = computed(() => {
+    if (!props.trajectorySuite) return null;
+    if (selectedMapKey.value === 'circuit') {
+        return {
+            isCircuit: true,
+            title: `${props.session.track?.name} — Circuito Completo`,
+            ...props.trajectorySuite.full_circuit,
+        };
+    }
+    const turnNum = Number(selectedMapKey.value.replace('turn_', ''));
+    const found = props.trajectorySuite.corners?.find((c) => c.turn === turnNum);
+    if (found) {
+        return {
+            isCircuit: false,
+            title: `Curva ${found.turn} · ${found.name}`,
+            ...found,
+        };
+    }
+    return {
+        isCircuit: true,
+        title: `${props.session.track?.name} — Circuito Completo`,
+        ...props.trajectorySuite.full_circuit,
+    };
+});
 
 const issueLabelMap = {
     overdriving_entry: 'Causa raíz: Frenada tardía → Vértice perdido',
+    abs_abuse: 'Causa raíz: Exceso de ABS en frenada (sobrecalienta goma delantera)',
     narrow_entry: 'Causa raíz: Entrada cerrada (falta abrirse al exterior)',
+    abrupt_turn_in: 'Causa raíz: Volantazo brusco al iniciar el giro',
     early_apex: 'Causa raíz: Giro prematuro (Early Apex → ahoga salida)',
     early_braking: 'Causa raíz: Frenada conservadora temprana',
+    abrupt_brake_release: 'Causa raíz: Suelta brusca de freno (falta trail-braking)',
+    wrong_gear_low: 'Causa raíz: Marcha demasiado corta en el vértice',
+    wrong_gear_high: 'Causa raíz: Marcha demasiado larga en el vértice',
     throttle_understeer: 'Causa raíz: Gas precipitado → Subviraje de salida',
     understeer_scrub: 'Causa raíz: Exceso de volante (arrastre delantero)',
+    missed_curb: 'Causa raíz: Esquivando piano interior aprovechable',
     missed_apex: 'Causa raíz: Vértice abierto (lejos del piano interior)',
     overslow_apex: 'Causa raíz: Exceso de freno residual en el vértice',
     pinched_exit: 'Causa raíz: Salida ahogada (falta abrir dirección)',
@@ -69,16 +106,25 @@ function promoteLap(lapId) {
     <AppLayout>
         <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
             <div>
-                <div class="flex items-center gap-2 text-xs text-emerald-400 font-semibold uppercase tracking-wider mb-1">
+                <div class="flex flex-wrap items-center gap-2 text-xs text-emerald-400 font-semibold uppercase tracking-wider mb-1">
                     <span>{{ session.track?.name }}</span>
                     <span>·</span>
                     <span>{{ session.ended_at ? 'Sesión Finalizada' : 'Sesión en Vivo' }}</span>
+                    <span
+                        class="px-2 py-0.5 rounded-full text-[10px] border normal-case"
+                        :class="isSelfRefMode ? 'bg-sky-500/15 text-sky-300 border-sky-500/30' : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'"
+                    >
+                        {{ isSelfRefMode ? 'Modo Auto-Referencia (Parciales propios)' : 'Target Externo Comparable' }}
+                    </span>
                 </div>
                 <h1 class="text-2xl sm:text-3xl font-bold text-white">{{ session.car_name }}</h1>
                 <p class="text-sm text-zinc-400 mt-1">
-                    Asfalto medio: <strong class="text-amber-300">{{ session.avg_track_temp_c }} °C</strong> (Aire {{ session.avg_air_temp_c }} °C)
+                    Asfalto medio: <strong class="text-amber-300">{{ session.avg_track_temp_c }} °C</strong> (Aire {{ session.avg_air_temp_c }} °C · {{ session.is_wet ? 'Mojado' : 'Seco' }})
                     <span v-if="session.active_reference_lap">
                         · Target a <strong class="text-emerald-300">{{ session.active_reference_lap.track_temp_c }} °C</strong> ({{ formatLapTime(session.active_reference_lap.lap_time_ms) }})
+                    </span>
+                    <span v-else class="text-sky-300">
+                        · Entrenando sobre tus mejores curvas y física en vivo (sin referencia externa comparable)
                     </span>
                 </p>
             </div>
@@ -127,27 +173,36 @@ function promoteLap(lapId) {
             </div>
         </div>
 
-        <!-- Active Real-Time Radio Coaching Plan + Causal Breakdown & 2D Trajectory Map -->
+        <!-- Active Real-Time Radio Coaching Plan -->
         <div v-if="session.active_coaching_plan?.focus_turn" class="mb-8 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-6">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                 <div>
-                    <span class="text-xs uppercase tracking-wider text-emerald-400 font-semibold">Diagnóstico Causal Activo por Radio</span>
+                    <span class="text-xs uppercase tracking-wider text-emerald-400 font-semibold">
+                        {{ session.active_coaching_plan.reference_mode === 'session_self' ? 'Auto-Diagnóstico sobre tu Mejor Pasada' : 'Diagnóstico Causal Activo por Radio' }}
+                    </span>
                     <h2 class="text-lg font-bold text-white">Foco en {{ session.active_coaching_plan.focus_turn_name }} (Curva {{ session.active_coaching_plan.focus_turn }})</h2>
                     <p v-if="session.active_coaching_plan.primary_issue" class="text-xs text-amber-300 mt-0.5">
                         {{ issueLabelMap[session.active_coaching_plan.primary_issue] || session.active_coaching_plan.primary_issue }}
                     </p>
                 </div>
                 <span class="text-xs px-3 py-1 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30 shrink-0">
-                    Pérdida media detectada: +{{ (session.active_coaching_plan.avg_time_loss_ms / 1000).toFixed(2) }}s
+                    Potencial estimado: +{{ (session.active_coaching_plan.avg_time_loss_ms / 1000).toFixed(2) }}s
                 </span>
             </div>
 
             <!-- Causal Telemetry Metrics Bar -->
-            <div v-if="breakdown" class="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-5 text-xs">
+            <div v-if="breakdown" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 mb-5 text-xs">
                 <div class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
-                    <div class="text-zinc-500">Punto Frenada</div>
+                    <div class="text-zinc-500">Frenada / ABS</div>
                     <div class="font-mono font-semibold text-zinc-100">
                         {{ breakdown.early_brake_m >= 0 ? `${breakdown.early_brake_m}m antes` : `${Math.abs(breakdown.early_brake_m)}m tarde` }}
+                        <span v-if="breakdown.abs_active_pct > 0" :class="breakdown.abs_active_pct >= 45 ? 'text-rose-400' : 'text-zinc-400'"> · ABS {{ breakdown.abs_active_pct }}%</span>
+                    </div>
+                </div>
+                <div v-if="breakdown.target_gear" class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
+                    <div class="text-zinc-500">Marcha Vértice</div>
+                    <div class="font-mono font-semibold" :class="breakdown.gear_delta !== 0 ? 'text-amber-300' : 'text-emerald-300'">
+                        Target {{ breakdown.target_gear }}ª {{ breakdown.gear_delta !== 0 ? `(${breakdown.gear_delta > 0 ? '+' : ''}${breakdown.gear_delta})` : '✓' }}
                     </div>
                 </div>
                 <div v-if="breakdown.has_trajectory" class="rounded-xl bg-zinc-900/90 border border-zinc-800 px-3 py-2">
@@ -176,68 +231,101 @@ function promoteLap(lapId) {
                 </div>
             </div>
 
-            <div class="grid lg:grid-cols-3 gap-4 items-stretch">
-                <div class="lg:col-span-2 grid md:grid-cols-2 gap-4">
-                    <div v-for="trg in activeTriggers" :key="trg.id" class="rounded-xl bg-zinc-900/90 border border-zinc-800 p-4 flex flex-col justify-between">
-                        <div>
-                            <div class="flex items-center justify-between text-xs text-zinc-400 mb-2">
-                                <span class="uppercase font-semibold text-emerald-400">{{ trg.phase === 'pre_brake' ? 'Anticipación Pre-Frenada' : 'Feedback Salida de Curva' }}</span>
-                                <span class="font-mono">Trigger @ {{ (trg.trigger_pct * 100).toFixed(1) }}%</span>
-                            </div>
-                            <p class="text-sm text-zinc-100 italic">“{{ trg.text }}”</p>
-                        </div>
+            <div class="grid md:grid-cols-2 gap-4">
+                <div v-for="trg in activeTriggers" :key="trg.id" class="rounded-xl bg-zinc-900/90 border border-zinc-800 p-4">
+                    <div class="flex items-center justify-between text-xs text-zinc-400 mb-1">
+                        <span class="uppercase font-semibold text-emerald-400">{{ trg.phase === 'pre_brake' ? 'Orden Pre-Frenada' : 'Orden Salida' }}</span>
+                        <span class="font-mono">Trigger @ {{ (trg.trigger_pct * 100).toFixed(1) }}%</span>
                     </div>
+                    <p class="text-sm text-zinc-100 font-medium">“{{ trg.text }}”</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Always-Available Interactive 2D Trajectory Viewer (Full Circuit + Corner Selector) -->
+        <div v-if="trajectorySuite && activeMapData" class="mb-8 rounded-2xl bg-zinc-900 border border-zinc-800 p-6">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4">
+                <div>
+                    <span class="text-xs uppercase tracking-wider text-emerald-400 font-semibold">Telemetría Espacial GPS (64-bit)</span>
+                    <h2 class="text-lg font-bold text-white">Visor Interactivo de Trazadas 2D</h2>
+                </div>
+                <div class="flex items-center gap-4 text-xs">
+                    <span class="inline-flex items-center gap-1.5 text-emerald-300 font-medium">
+                        <span class="w-3 h-0.5 bg-emerald-400 inline-block"></span>
+                        {{ trajectorySuite.target_label }}
+                    </span>
+                    <span class="inline-flex items-center gap-1.5 text-amber-300 font-medium">
+                        <span class="w-3 h-0.5 bg-amber-400 inline-block"></span>
+                        Tu última trazada
+                    </span>
+                </div>
+            </div>
+
+            <!-- Circuit & Corner Selector Pills -->
+            <div class="flex flex-wrap gap-2 mb-4">
+                <button
+                    type="button"
+                    @click="selectedMapKey = 'circuit'"
+                    class="px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer"
+                    :class="selectedMapKey === 'circuit' ? 'bg-emerald-500 text-zinc-950 border-emerald-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800 hover:border-zinc-600'"
+                >
+                    🏁 Circuito Completo
+                </button>
+                <button
+                    v-for="c in trajectorySuite.corners"
+                    :key="c.turn"
+                    type="button"
+                    @click="selectedMapKey = `turn_${c.turn}`"
+                    class="px-3 py-1.5 rounded-xl text-xs font-medium border transition cursor-pointer"
+                    :class="selectedMapKey === `turn_${c.turn}` ? 'bg-emerald-500 text-zinc-950 border-emerald-400 font-bold' : 'bg-zinc-950 text-zinc-300 border-zinc-800 hover:border-zinc-600'"
+                >
+                    C{{ c.turn }} · {{ c.name }}
+                </button>
+            </div>
+
+            <div class="rounded-xl bg-zinc-950 border border-zinc-800 p-4">
+                <div class="flex items-center justify-between text-xs text-zinc-400 mb-2">
+                    <span class="font-semibold text-zinc-200">{{ activeMapData.title }}</span>
+                    <span v-if="!activeMapData.isCircuit">Entrada desde abajo hacia arriba · Punto verde = Vértice</span>
+                    <span v-else>Vista cenital completa del trazado</span>
                 </div>
 
-                <!-- 2D Top-Down Trajectory Comparison Mini-Map -->
-                <div v-if="focusTrajectoryMap" class="rounded-xl bg-zinc-950 border border-zinc-800 p-4 flex flex-col">
-                    <div class="flex items-center justify-between text-[11px] text-zinc-400 mb-2">
-                        <span class="font-semibold text-zinc-200">Mapa 2D Trazada ({{ focusTrajectoryMap.name }})</span>
-                        <div class="flex items-center gap-2.5">
-                            <span class="inline-flex items-center gap-1 text-emerald-400"><span class="w-2.5 h-0.5 bg-emerald-400 inline-block"></span>Target</span>
-                            <span class="inline-flex items-center gap-1 text-amber-400"><span class="w-2.5 h-0.5 bg-amber-400 inline-block"></span>Tú</span>
-                        </div>
-                    </div>
-                    <svg :viewBox="focusTrajectoryMap.view_box" class="w-full h-44 rounded-lg bg-zinc-900/60 p-1">
-                        <!-- Asphalt corridor -->
-                        <polyline
-                            :points="pointsToPolyline(focusTrajectoryMap.ref_points)"
-                            fill="none"
-                            stroke="#27272a"
-                            stroke-width="10"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        />
-                        <!-- Target reference line -->
-                        <polyline
-                            :points="pointsToPolyline(focusTrajectoryMap.ref_points)"
-                            fill="none"
-                            stroke="#34d399"
-                            stroke-width="1.6"
-                            stroke-dasharray="3,2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        />
-                        <!-- Driver line -->
-                        <polyline
-                            :points="pointsToPolyline(focusTrajectoryMap.driver_points)"
-                            fill="none"
-                            stroke="#fbbf24"
-                            stroke-width="1.8"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        />
-                        <!-- Apex marker -->
-                        <circle
-                            v-if="focusTrajectoryMap.markers?.apex"
-                            :cx="focusTrajectoryMap.markers.apex[0]"
-                            :cy="focusTrajectoryMap.markers.apex[1]"
-                            r="2.4"
-                            fill="#10b981"
-                        />
-                    </svg>
-                    <p class="text-[10px] text-zinc-500 mt-1.5 text-center">Entrada desde abajo hacia arriba · Punto verde = Vértice referencia</p>
-                </div>
+                <svg :viewBox="activeMapData.view_box" class="w-full h-72 sm:h-80 rounded-lg bg-zinc-900/50 p-2">
+                    <!-- Asphalt ribbon -->
+                    <polyline
+                        :points="pointsToPolyline(activeMapData.ref_points)"
+                        fill="none"
+                        stroke="#27272a"
+                        :stroke-width="activeMapData.isCircuit ? 14 : 10"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    />
+                    <!-- Target / Self-Best reference line -->
+                    <polyline
+                        :points="pointsToPolyline(activeMapData.ref_points)"
+                        fill="none"
+                        stroke="#34d399"
+                        :stroke-width="activeMapData.isCircuit ? 3.2 : 1.7"
+                        stroke-dasharray="4,2.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    />
+                    <!-- Driver line -->
+                    <polyline
+                        :points="pointsToPolyline(activeMapData.driver_points)"
+                        fill="none"
+                        stroke="#fbbf24"
+                        :stroke-width="activeMapData.isCircuit ? 3.2 : 1.9"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    />
+                    <!-- Corner markers when zoomed into a turn -->
+                    <template v-if="!activeMapData.isCircuit && activeMapData.markers">
+                        <circle v-if="activeMapData.markers.brake" :cx="activeMapData.markers.brake[0]" :cy="activeMapData.markers.brake[1]" r="2.2" fill="#f43f5e" />
+                        <circle v-if="activeMapData.markers.apex" :cx="activeMapData.markers.apex[0]" :cy="activeMapData.markers.apex[1]" r="2.6" fill="#10b981" />
+                        <circle v-if="activeMapData.markers.exit" :cx="activeMapData.markers.exit[0]" :cy="activeMapData.markers.exit[1]" r="2.2" fill="#38bdf8" />
+                    </template>
+                </svg>
             </div>
         </div>
 

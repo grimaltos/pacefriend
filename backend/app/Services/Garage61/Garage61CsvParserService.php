@@ -38,6 +38,9 @@ class Garage61CsvParserService
         $lonIdx = $colMap['lon'] ?? $colMap['lng'] ?? $colMap['longitude'] ?? null;
         $steerIdx = $colMap['steeringwheelangle'] ?? $colMap['steering_wheel_angle'] ?? $colMap['steer'] ?? null;
         $yawIdx = $colMap['yawrate'] ?? $colMap['yaw_rate'] ?? null;
+        $absIdx = $colMap['brakeabsactive'] ?? $colMap['absactive'] ?? $colMap['abs'] ?? null;
+        $lfRumbleIdx = $colMap['tirelf_rumblepitch'] ?? $colMap['lfrumble'] ?? null;
+        $rfRumbleIdx = $colMap['tirerf_rumblepitch'] ?? $colMap['rfrumble'] ?? null;
 
         if ($pctIdx === null || $speedIdx === null || $throttleIdx === null || $brakeIdx === null) {
             throw new InvalidArgumentException('El CSV de Garage 61 no incluye las columnas base requeridas (LapDistPct, Speed, Throttle, Brake).');
@@ -78,6 +81,14 @@ class Garage61CsvParserService
             $lonVal = ($lonIdx !== null && isset($cols[$lonIdx]) && is_numeric($cols[$lonIdx])) ? (float) $cols[$lonIdx] : null;
             $steerVal = ($steerIdx !== null && isset($cols[$steerIdx]) && is_numeric($cols[$steerIdx])) ? (float) $cols[$steerIdx] : null;
             $yawVal = ($yawIdx !== null && isset($cols[$yawIdx]) && is_numeric($cols[$yawIdx])) ? (float) $cols[$yawIdx] : null;
+            $flags = 0;
+            if ($absIdx !== null && isset($cols[$absIdx]) && ((float) $cols[$absIdx] > 0.5 || strtolower(trim($cols[$absIdx])) === 'true')) {
+                $flags |= 8; // FlagABSActive
+            }
+            if (($lfRumbleIdx !== null && isset($cols[$lfRumbleIdx]) && (float) $cols[$lfRumbleIdx] > 1.0)
+                || ($rfRumbleIdx !== null && isset($cols[$rfRumbleIdx]) && (float) $cols[$rfRumbleIdx] > 1.0)) {
+                $flags |= 16; // FlagCurbStrike
+            }
 
             $maxPctSeen = max($maxPctSeen, $pct);
             $maxThrottleSeen = max($maxThrottleSeen, $throttle);
@@ -100,6 +111,7 @@ class Garage61CsvParserService
                 'lon' => $lonVal,
                 'steer' => $steerVal,
                 'yaw' => $yawVal,
+                'flags' => $flags,
             ];
         }
 
@@ -149,7 +161,7 @@ class Garage61CsvParserService
                 'brake' => round(max(0.0, min(1.0, $r['brake'] / $brakeDivisor)), 3),
                 'lap' => 1,
                 'gear' => $r['gear'],
-                'flags' => 0,
+                'flags' => $r['flags'] ?? 0,
             ];
             if ($r['lat'] !== null && $r['lon'] !== null && (abs($r['lat']) > 0.001 || abs($r['lon']) > 0.001)) {
                 $sampleRow['lat'] = round($r['lat'], 7);

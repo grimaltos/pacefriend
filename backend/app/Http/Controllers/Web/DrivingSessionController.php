@@ -48,11 +48,11 @@ class DrivingSessionController extends Controller
             'report',
         ]);
 
-        $focusTrajectoryMap = $this->resolveFocusCornerMap($session);
+        $trajectorySuite = $this->resolveInteractiveTrajectorySuite($session);
 
         return Inertia::render('Sessions/Show', [
             'session' => $session,
-            'focusTrajectoryMap' => $focusTrajectoryMap,
+            'trajectorySuite' => $trajectorySuite,
         ]);
     }
 
@@ -81,41 +81,64 @@ class DrivingSessionController extends Controller
     }
 
     /**
+     * Build the interactive Full-Circuit + Per-Corner 2D Trajectory Viewer payload,
+     * comparing the latest lap against either the matched External ReferenceLap (if it has GPS)
+     * or the driver's own Best Session Lap in Self-Reference mode.
+     *
      * @return array<string, mixed>|null
      */
-    private function resolveFocusCornerMap(DrivingSession $session): ?array
+    private function resolveInteractiveTrajectorySuite(DrivingSession $session): ?array
     {
-        $focusTurn = (int) ($session->active_coaching_plan['focus_turn'] ?? 0);
-        if ($focusTurn <= 0 || $session->active_reference_lap_id === null || empty($session->track?->corners)) {
-            return null;
-        }
-
-        $cornerDef = null;
-        foreach ($session->track->corners as $c) {
-            if ((int) ($c['turn'] ?? 0) === $focusTurn) {
-                $cornerDef = $c;
-                break;
-            }
-        }
-        if ($cornerDef === null) {
-            return null;
-        }
-
-        $fullRef = ReferenceLap::query()->find($session->active_reference_lap_id);
         $latestLap = Lap::query()
             ->where('driving_session_id', $session->id)
             ->whereNotNull('samples')
-            ->latest('id')
-            ->first(['id', 'samples']);
+            ->orderByDesc('is_complete')
+            ->orderByDesc('id')
+            ->first(['id', 'lap_number', 'samples']);
 
-        if ($fullRef === null || $latestLap === null) {
+        if ($latestLap === null || empty($latestLap->samples)) {
             return null;
         }
 
-        return $this->normalizer->buildCornerTrajectoryMap(
-            $fullRef,
-            $latestLap->samples ?? [],
-            $cornerDef
+        $targetPoints = [];
+        $targetLabel = 'Auto-Referencia de Sesión';
+
+        if ($session->active_reference_lap_id !== null) {
+            $fullRef = ReferenceLap::query()->find($session->active_reference_lap_id);
+            if ($fullRef !== null) {
+                $hasRefGps = collect($fullRef->normalized_points ?? [])->contains(
+                    static fn (array $p) => isset($p['lat'], $p['lon']) && (abs((float) $p['lat']) > 0.001 || abs((float) $p['lon']) > 0.001)
+                );
+                if ($hasRefGps) {
+                    $targetPoints = $fullRef->normalized_points ?? [];
+                    $targetLabel = "Target: {$fullRef->label}";
+                }
+            }
+        }
+
+        // Self-Reference fallback: compare against driver's fastest clean lap in this session
+        if ($targetPoints === []) {
+            $bestSelfLap = Lap::query()
+                ->where('driving_session_id', $session->id)
+                ->where('is_complete', true)
+                ->whereNotNull('samples')
+                ->orderByDesc('is_clean')
+                ->orderBy('lap_time_ms')
+                ->first(['id', 'lap_number', 'samples']);
+
+            if ($bestSelfLap !== null && ! empty($bestSelfLap->samples)) {
+                $targetPoints = $bestSelfLap->samples;
+                $targetLabel = "Tu Mejor Vuelta (#{$bestSelfLap->lap_number})";
+            } else {
+                $targetPoints = $latestLap->samples;
+            }
+        }
+
+        return $this->normalizer->buildInteractiveTrajectorySuite(
+            $targetPoints,
+            $latestLap->samples,
+            $session->track?->corners ?? [],
+            $targetLabel
         );
     }
 }

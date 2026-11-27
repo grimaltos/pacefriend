@@ -6,9 +6,15 @@ import "context"
 type SampleFlags uint16
 
 const (
-	FlagOffTrack  SampleFlags = 1 << 0 // PlayerTrackSurface == OffTrack (0)
-	FlagOnPitRoad SampleFlags = 1 << 1 // OnPitRoad == true
-	FlagIncident  SampleFlags = 1 << 2 // PlayerCarMyIncidentCount increased
+	FlagOffTrack   SampleFlags = 1 << 0 // PlayerTrackSurface == OffTrack (0)
+	FlagOnPitRoad  SampleFlags = 1 << 1 // OnPitRoad == true
+	FlagIncident   SampleFlags = 1 << 2 // PlayerCarMyIncidentCount increased
+	FlagABSActive  SampleFlags = 1 << 3 // BrakeABSactive == true
+	FlagCurbStrike SampleFlags = 1 << 4 // TireLF/RF_RumblePitch > 0 (riding kerb)
+
+	// FlagsDirtyMask isolates cleanliness-invalidating flags so telemetry sensor bits
+	// (ABS, CurbStrike) never mark a lap or partial dirty.
+	FlagsDirtyMask SampleFlags = FlagOffTrack | FlagOnPitRoad | FlagIncident
 )
 
 // Sample is a pointer-free (noscan) 56-byte telemetry point stored at 20 Hz.

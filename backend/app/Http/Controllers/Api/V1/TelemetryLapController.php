@@ -67,7 +67,7 @@ class TelemetryLapController extends Controller
         $isWet = (bool) ($validated['is_wet'] ?? false);
         $fuelLevelL = isset($validated['fuel_level_l']) ? (float) $validated['fuel_level_l'] : null;
 
-        $referenceLap = $this->matcher->selectBestReference(
+        $match = $this->matcher->matchWithDiagnostics(
             $user->id,
             $track->id,
             $validated['car_name'],
@@ -75,6 +75,7 @@ class TelemetryLapController extends Controller
             $airTempC,
             $isWet
         );
+        $referenceLap = $match['reference'];
 
         $session = $this->resolveActiveDrivingSession(
             $user,
@@ -96,7 +97,9 @@ class TelemetryLapController extends Controller
             $isWet,
             $fuelLevelL,
             $referenceLap,
-            (string) ($validated['reason'] ?? 'session_start')
+            (string) ($validated['reason'] ?? 'session_start'),
+            $match['discarded_reason'],
+            $match['discarded_ref']
         );
 
         return response()->json([
@@ -284,12 +287,13 @@ class TelemetryLapController extends Controller
             ]);
         }
 
-        // Rebuild coaching plan mid-lap from all clean corner passes!
+        // Rebuild coaching plan mid-lap from all clean corner passes (External Target OR Session Self-Reference)!
         $diagnosticResult = $this->diagnostic->buildCoachingPlan(
             $user,
             $track,
             $validated['car_name'],
-            $referenceLap
+            $referenceLap,
+            $session->id
         );
 
         $previousPlan = is_array($session->active_coaching_plan) ? $session->active_coaching_plan : [];
@@ -538,7 +542,8 @@ class TelemetryLapController extends Controller
             $user,
             $track,
             $validated['car_name'],
-            $referenceLap
+            $referenceLap,
+            $session->id
         );
 
         $avgFuelUsed = Lap::query()
@@ -548,6 +553,8 @@ class TelemetryLapController extends Controller
             ->whereNotNull('fuel_used_l')
             ->where('fuel_used_l', '>', 0.1)
             ->avg('fuel_used_l');
+
+        $straightBrakeDragMs = $this->normalizer->detectStraightBrakeDragMs($validated['samples']);
 
         $session->clean_laps_count = $newCleanCount;
         $radioCallouts = $this->radioEngineer->buildLapCrossingCallouts(
@@ -559,7 +566,8 @@ class TelemetryLapController extends Controller
             $previousRef,
             $referenceLap,
             $avgFuelUsed !== null ? (float) $avgFuelUsed : $fuelUsedL,
-            $radioFlags
+            $radioFlags,
+            $straightBrakeDragMs
         );
 
         $storedPlan = $diagnosticResult['plan'] ?? $previousPlan ?? [];

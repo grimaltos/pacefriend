@@ -6,6 +6,9 @@ use App\Models\ReferenceLap;
 
 class TelemetryNormalizerService
 {
+    private const FLAG_DIRTY_MASK = 0x07; // OffTrack (1) | OnPitRoad (2) | Incident (4)
+    private const FLAG_ABS_ACTIVE = 0x08; // BrakeABSactive (8)
+    private const FLAG_CURB_STRIKE = 0x10; // Tire RumblePitch > 0 (16)
     /**
      * Resample raw lap telemetry onto a uniform LapDistPct grid [0.000 .. 0.996].
      *
@@ -57,6 +60,10 @@ class TelemetryNormalizerService
             }
             if (isset($left['yaw'], $right['yaw'])) {
                 $point['yaw'] = round($this->lerp((float) $left['yaw'], (float) $right['yaw'], $alpha), 4);
+            }
+            $sensorBits = (((int) ($left['flags'] ?? 0)) | ((int) ($right['flags'] ?? 0))) & (self::FLAG_ABS_ACTIVE | self::FLAG_CURB_STRIKE);
+            if ($sensorBits !== 0) {
+                $point['flags'] = $sensorBits;
             }
 
             $grid[] = $point;
@@ -120,7 +127,7 @@ class TelemetryNormalizerService
             $guardStart = $this->wrapPct($windowStart - $guardPct);
             $dirtyInGuard = false;
             foreach ($samples as $s) {
-                if (((int) ($s['flags'] ?? 0)) !== 0 && $this->isPctInArc((float) ($s['pct'] ?? 0.0), $guardStart, $windowEnd)) {
+                if ((((int) ($s['flags'] ?? 0)) & self::FLAG_DIRTY_MASK) !== 0 && $this->isPctInArc((float) ($s['pct'] ?? 0.0), $guardStart, $windowEnd)) {
                     $dirtyInGuard = true;
                     break;
                 }
@@ -137,15 +144,28 @@ class TelemetryNormalizerService
             $throttlePickupPct = null;
             $fullThrottlePct = null;
             $passedApex = false;
+            $minGear = 99;
+            $brakingSamplesCount = 0;
+            $absSamplesCount = 0;
+            $coastingMs = 0;
+            $curbUsed = false;
 
-            foreach ($windowSamples as $s) {
+            foreach ($windowSamples as $idx => $s) {
                 $pct = (float) ($s['pct'] ?? 0.0);
                 $brake = (float) ($s['brake'] ?? 0.0);
                 $throttle = (float) ($s['throttle'] ?? 0.0);
                 $speed = (float) ($s['speed'] ?? 0.0);
+                $gear = (int) ($s['gear'] ?? 3);
+                $flags = (int) ($s['flags'] ?? 0);
 
                 if ($brakeOnsetPct === null && $brake >= 0.12 && ! $passedApex) {
                     $brakeOnsetPct = $pct;
+                }
+                if ($brake >= 0.25) {
+                    $brakingSamplesCount++;
+                    if (($flags & self::FLAG_ABS_ACTIVE) !== 0) {
+                        $absSamplesCount++;
+                    }
                 }
                 if ($brake > $peakBrake) {
                     $peakBrake = $brake;
@@ -155,9 +175,27 @@ class TelemetryNormalizerService
                 }
 
                 $distToApex = abs($this->signedPctDiff($pct, $apexPct));
+                if ($distToApex <= 0.012) {
+                    if ($gear > 0 && $gear < $minGear) {
+                        $minGear = $gear;
+                    }
+                    if (($flags & self::FLAG_CURB_STRIKE) !== 0) {
+                        $curbUsed = true;
+                    }
+                }
                 if ($distToApex < $closestApexDist) {
                     $closestApexDist = $distToApex;
                     $trailBrakeAtApex = $brake;
+                }
+
+                // Measure dead coasting time (neither brake nor throttle) between braking onset and apex+0.5%
+                if ($idx > 0 && $brakeOnsetPct !== null && ! $passedApex && $brake < 0.05 && $throttle < 0.05) {
+                    $dt = (int) ($s['t_ms'] ?? 0) - (int) ($windowSamples[$idx - 1]['t_ms'] ?? 0);
+                    if ($dt > 0 && $dt < 300) {
+                        $coastingMs += $dt;
+                    } else {
+                        $coastingMs += 50;
+                    }
                 }
 
                 if ($this->arcDistance($windowStart, $pct) >= $this->arcDistance($windowStart, $apexPct)) {
@@ -175,6 +213,7 @@ class TelemetryNormalizerService
             }
 
             $exitSample = end($windowSamples);
+            $absRatio = $brakingSamplesCount > 0 ? round($absSamplesCount / $brakingSamplesCount, 3) : 0.0;
             $lineAndSteer = $this->extractCornerGeometryAndSteering(
                 $windowSamples,
                 $windowStart,
@@ -195,6 +234,10 @@ class TelemetryNormalizerService
                 'peak_brake' => round($peakBrake, 3),
                 'trail_brake_at_apex' => round($trailBrakeAtApex, 3),
                 'apex_min_speed_ms' => round(is_finite($minSpeedMs) ? $minSpeedMs : 0.0, 2),
+                'min_gear' => $minGear < 20 ? $minGear : (int) ($exitSample['gear'] ?? 2),
+                'abs_active_ratio' => $absRatio,
+                'coasting_ms' => $coastingMs,
+                'curb_used' => $curbUsed,
                 'throttle_pickup_pct' => $throttlePickupPct ?? $apexPct,
                 'full_throttle_pct' => $fullThrottlePct ?? $exitPct,
                 'exit_speed_ms' => round((float) ($exitSample['speed'] ?? 0.0), 2),
@@ -251,7 +294,7 @@ class TelemetryNormalizerService
             $checkEnd = $endPct >= 0.999 ? 0.9999 : $endPct;
             $dirtyInGuard = false;
             foreach ($samples as $s) {
-                if (((int) ($s['flags'] ?? 0)) !== 0 && $this->isPctInArc((float) ($s['pct'] ?? 0.0), $guardStart, $checkEnd)) {
+                if ((((int) ($s['flags'] ?? 0)) & self::FLAG_DIRTY_MASK) !== 0 && $this->isPctInArc((float) ($s['pct'] ?? 0.0), $guardStart, $checkEnd)) {
                     $dirtyInGuard = true;
                     break;
                 }
@@ -409,6 +452,8 @@ class TelemetryNormalizerService
             $apexBrakeExcess = round((float) $dc['trail_brake_at_apex'] - (float) $rc['trail_brake_at_apex'], 3);
 
             $lineDeltas = $this->compareCornerTrajectoryAndSteering($dc, $rc);
+            $dcGear = (int) ($dc['min_gear'] ?? 0);
+            $rcGear = (int) ($rc['min_gear'] ?? 0);
 
             $compared[] = array_merge($dc, [
                 'time_loss_ms' => $timeLossMs,
@@ -417,6 +462,12 @@ class TelemetryNormalizerService
                 'apex_speed_delta_kmh' => $apexSpeedDeltaKmh,
                 'exit_speed_delta_kmh' => $exitSpeedDeltaKmh,
                 'apex_brake_excess' => $apexBrakeExcess,
+                'target_gear' => $rcGear > 0 ? $rcGear : null,
+                'gear_delta' => ($dcGear > 0 && $rcGear > 0) ? ($dcGear - $rcGear) : 0,
+                'abs_excess' => round((float) ($dc['abs_active_ratio'] ?? 0.0) - (float) ($rc['abs_active_ratio'] ?? 0.0), 3),
+                'coasting_excess_ms' => (int) ($dc['coasting_ms'] ?? 0) - (int) ($rc['coasting_ms'] ?? 0),
+                'missed_curb' => (! empty($rc['curb_used'])) && empty($dc['curb_used']),
+                'steer_jerk_excess_degs' => round((float) ($dc['max_steer_rate_degs'] ?? 0.0) - (float) ($rc['max_steer_rate_degs'] ?? 220.0), 1),
             ], $lineDeltas);
         }
 
@@ -433,6 +484,116 @@ class TelemetryNormalizerService
     }
 
     /**
+     * Detect involuntary left-foot brake resting while at full throttle on straights.
+     *
+     * @param  array<int, array<string, mixed>>  $samples
+     */
+    public function detectStraightBrakeDragMs(array $samples): int
+    {
+        $dragMs = 0;
+        for ($i = 1, $n = count($samples); $i < $n; $i++) {
+            $s = $samples[$i];
+            $throttle = (float) ($s['throttle'] ?? 0.0);
+            $brake = (float) ($s['brake'] ?? 0.0);
+            $speed = (float) ($s['speed'] ?? 0.0);
+
+            if ($throttle >= 0.94 && $brake >= 0.02 && $speed >= 30.0) {
+                $dt = (int) ($s['t_ms'] ?? 0) - (int) ($samples[$i - 1]['t_ms'] ?? 0);
+                $dragMs += ($dt > 0 && $dt < 300) ? $dt : 50;
+            }
+        }
+
+        return $dragMs;
+    }
+
+    /**
+     * Build a complete interactive 2D Trajectory Viewer suite (Full Circuit + Every Corner)
+     * comparing driver samples against either an external ReferenceLap or the driver's own Best Session Lap.
+     *
+     * @param  array<int, array<string, mixed>>  $targetPoints
+     * @param  array<int, array<string, mixed>>  $driverSamples
+     * @param  array<int, array<string, mixed>>  $corners
+     * @return array<string, mixed>|null
+     */
+    public function buildInteractiveTrajectorySuite(
+        array $targetPoints,
+        array $driverSamples,
+        array $corners,
+        string $targetLabel = 'Target'
+    ): ?array {
+        $refGeo = array_values(array_filter(
+            $targetPoints,
+            static fn (array $s) => isset($s['lat'], $s['lon']) && (abs((float) $s['lat']) > 0.001 || abs((float) $s['lon']) > 0.001)
+        ));
+        $drvGeo = array_values(array_filter(
+            $driverSamples,
+            static fn (array $s) => isset($s['lat'], $s['lon']) && (abs((float) $s['lat']) > 0.001 || abs((float) $s['lon']) > 0.001)
+        ));
+
+        if (count($refGeo) < 8 && count($drvGeo) < 8) {
+            return null;
+        }
+
+        $anchor = $refGeo[0] ?? $drvGeo[0];
+        $lat0 = (float) $anchor['lat'];
+        $lon0 = (float) $anchor['lon'];
+        $cosLat = cos(deg2rad($lat0));
+
+        $projectGlobal = static fn (float $lat, float $lon): array => [
+            round(($lon - $lon0) * 111320.0 * $cosLat, 1),
+            round(-(($lat - $lat0) * 110540.0), 1),
+        ];
+
+        $refCircuit = [];
+        $drvCircuit = [];
+        $xs = [];
+        $ys = [];
+
+        $refStride = max(1, intdiv(count($refGeo), 220));
+        for ($i = 0, $n = count($refGeo); $i < $n; $i += $refStride) {
+            [$gx, $gy] = $projectGlobal((float) $refGeo[$i]['lat'], (float) $refGeo[$i]['lon']);
+            $refCircuit[] = [$gx, $gy];
+            $xs[] = $gx;
+            $ys[] = $gy;
+        }
+
+        $drvStride = max(1, intdiv(count($drvGeo), 220));
+        for ($i = 0, $n = count($drvGeo); $i < $n; $i += $drvStride) {
+            [$gx, $gy] = $projectGlobal((float) $drvGeo[$i]['lat'], (float) $drvGeo[$i]['lon']);
+            $drvCircuit[] = [$gx, $gy];
+            $xs[] = $gx;
+            $ys[] = $gy;
+        }
+
+        $pad = 25.0;
+        $minX = floor(min($xs) - $pad);
+        $maxX = ceil(max($xs) + $pad);
+        $minY = floor(min($ys) - $pad);
+        $maxY = ceil(max($ys) + $pad);
+        $w = max(50.0, $maxX - $minX);
+        $h = max(50.0, $maxY - $minY);
+
+        $cornerMaps = [];
+        $effectiveRefForCorners = count($refGeo) >= 8 ? $targetPoints : $driverSamples;
+        foreach ($corners as $c) {
+            $cm = $this->buildCornerTrajectoryMapFromPoints($effectiveRefForCorners, $driverSamples, $c);
+            if ($cm !== null) {
+                $cornerMaps[] = $cm;
+            }
+        }
+
+        return [
+            'target_label' => $targetLabel,
+            'full_circuit' => [
+                'view_box' => "{$minX} {$minY} {$w} {$h}",
+                'ref_points' => $refCircuit,
+                'driver_points' => $drvCircuit,
+            ],
+            'corners' => $cornerMaps,
+        ];
+    }
+
+    /**
      * Build a top-down 2D trajectory comparison (Target vs Driver) for a specific corner,
      * rotated so the approach straight points cleanly upwards (-Y in SVG viewBox coordinates).
      *
@@ -445,12 +606,29 @@ class TelemetryNormalizerService
         array $driverSamples,
         array $corner
     ): ?array {
-        if ($referenceLap === null || $driverSamples === [] || empty($corner)) {
+        if ($referenceLap === null) {
             return null;
         }
 
-        $refPoints = $referenceLap->normalized_points ?? [];
-        if ($refPoints === []) {
+        return $this->buildCornerTrajectoryMapFromPoints(
+            $referenceLap->normalized_points ?? [],
+            $driverSamples,
+            $corner
+        );
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $refPoints
+     * @param  array<int, array<string, mixed>>  $driverSamples
+     * @param  array<string, mixed>  $corner
+     * @return array<string, mixed>|null
+     */
+    public function buildCornerTrajectoryMapFromPoints(
+        array $refPoints,
+        array $driverSamples,
+        array $corner
+    ): ?array {
+        if ($refPoints === [] || $driverSamples === [] || empty($corner)) {
             return null;
         }
 
@@ -585,9 +763,11 @@ class TelemetryNormalizerService
         $steerSignedSum = 0.0;
         $yawSum = 0.0;
         $steerCount = 0;
+        $maxSteerRateDegs = 0.0;
         $apexArc = $this->arcDistance($windowStart, $apexPct);
+        $brakeArc = $this->arcDistance($windowStart, $brakePct);
 
-        foreach ($windowSamples as $s) {
+        foreach ($windowSamples as $idx => $s) {
             $arc = $this->arcDistance($windowStart, (float) ($s['pct'] ?? 0.0));
             if (abs($arc - $apexArc) <= 0.012 && isset($s['steer'])) {
                 $st = (float) $s['steer'];
@@ -598,12 +778,26 @@ class TelemetryNormalizerService
                 }
                 $steerCount++;
             }
+
+            // Turn-in hand smoothness: peak |dSteer/dt| (°/s) between brake_pct and apex_pct
+            if ($idx > 0 && $arc >= $brakeArc && $arc <= ($apexArc + 0.005) && isset($s['steer'], $windowSamples[$idx - 1]['steer'])) {
+                $dtSec = ((int) ($s['t_ms'] ?? 0) - (int) ($windowSamples[$idx - 1]['t_ms'] ?? 0)) / 1000.0;
+                if ($dtSec <= 0.0 || $dtSec > 0.3) {
+                    $dtSec = 0.05;
+                }
+                $dDeg = abs((float) $s['steer'] - (float) $windowSamples[$idx - 1]['steer']) * 57.29578;
+                $rate = $dDeg / $dtSec;
+                if ($rate < 1500.0 && $rate > $maxSteerRateDegs) {
+                    $maxSteerRateDegs = $rate;
+                }
+            }
         }
 
         $out = [];
         if ($steerCount > 0) {
             $out['apex_steer_deg'] = round($steerSum / $steerCount, 1);
             $out['apex_yaw_degs'] = round($yawSum / $steerCount, 1);
+            $out['max_steer_rate_degs'] = round($maxSteerRateDegs, 1);
             $out['turn_dir'] = $steerSignedSum >= 0.0 ? 1 : -1; // +1 = Left, -1 = Right
         }
 
@@ -736,7 +930,7 @@ class TelemetryNormalizerService
     private function hasAnyFlaggedSample(array $samples): bool
     {
         foreach ($samples as $s) {
-            if (((int) ($s['flags'] ?? 0)) !== 0) {
+            if ((((int) ($s['flags'] ?? 0)) & self::FLAG_DIRTY_MASK) !== 0) {
                 return true;
             }
         }

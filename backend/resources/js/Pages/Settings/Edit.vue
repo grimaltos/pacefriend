@@ -19,7 +19,6 @@ const profileForm = useForm({
 });
 
 const g61Form = useForm({
-    garage61_token: '',
     clear_token: false,
     autopilot_enabled: props.profile.autopilot_enabled ?? true,
     reference_scope: props.profile.reference_scope || 'team_then_public',
@@ -38,7 +37,6 @@ function saveProfile() {
 function saveGarage61() {
     g61Form.put('/settings/garage61', {
         onSuccess: () => {
-            g61Form.garage61_token = '';
             g61Form.clear_token = false;
         },
     });
@@ -105,16 +103,16 @@ function revoke(id) {
                 </form>
             </div>
 
-            <!-- Garage 61 API + Progressive Autopilot (Options A + C) -->
+            <!-- Garage 61 OAuth2 + Progressive Autopilot -->
             <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6">
                 <div class="flex items-center justify-between mb-1">
                     <h2 class="text-lg font-semibold text-white">Garage 61 &amp; Autopilot Progresivo</h2>
                     <span :class="profile.garage61_connected ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'" class="text-[11px] px-2.5 py-0.5 rounded-full border font-medium">
-                        {{ profile.garage61_connected ? (profile.garage61_auth_type === 'oauth' ? 'Conectado vía OAuth2' : 'Token Personal Conectado') : 'Sin Conectar' }}
+                        {{ profile.garage61_connected ? 'Cuenta Vinculada' : 'Sin Vincular' }}
                     </span>
                 </div>
                 <p class="text-xs text-zinc-400 mb-4">
-                    Vincula tu cuenta en 1 clic con OAuth2 (ideal para ti y tus compañeros de equipo) o usa un Personal Access Token manual.
+                    Vincula tu cuenta de Garage 61 en un clic para sincronizar tus vueltas, tus análisis y las referencias de tu equipo.
                 </p>
 
                 <!-- 1-Click OAuth2 Button -->
@@ -122,12 +120,13 @@ function revoke(id) {
                     <a
                         v-if="profile.garage61_oauth_available"
                         href="/settings/garage61/redirect"
-                        class="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-sm transition"
+                        class="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-bold text-sm transition"
+                        :class="profile.garage61_connected ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700' : 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950'"
                     >
-                        <span>{{ profile.garage61_connected && profile.garage61_auth_type === 'oauth' ? 'Reconectar cuenta de Garage 61 (OAuth2)' : 'Conectar mi cuenta de Garage 61 (1 Clic)' }}</span>
+                        <span>{{ profile.garage61_connected ? 'Reconectar cuenta de Garage 61' : 'Conectar mi cuenta de Garage 61' }}</span>
                     </a>
                     <div v-else class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3.5 py-2.5 text-[11px] text-zinc-400">
-                        Botón OAuth2 listo: se activará automáticamente en cuanto añadas <code class="text-zinc-200">GARAGE61_CLIENT_ID</code> y <code class="text-zinc-200">GARAGE61_CLIENT_SECRET</code> en el <code class="text-zinc-200">.env</code> (Callback: <code class="text-emerald-400">{{ profile.garage61_callback_url }}</code>).
+                        Configura <code class="text-zinc-200">GARAGE61_CLIENT_ID</code> y <code class="text-zinc-200">GARAGE61_CLIENT_SECRET</code> en el servidor para habilitar OAuth2.
                     </div>
                 </div>
 
@@ -136,23 +135,10 @@ function revoke(id) {
                     <template v-else>
                         <div class="text-zinc-300">Piloto G61: <strong class="text-white">{{ profile.garage61_status.driver }}</strong> · Plan: <span class="uppercase text-emerald-400">{{ profile.garage61_status.plan }}</span></div>
                         <div class="text-zinc-400">Equipos: <span class="text-zinc-200">{{ profile.garage61_status.teams?.join(', ') || 'Ninguno' }}</span></div>
-                        <div class="text-zinc-400">
-                            Permisos activos en token:
-                            <span v-if="profile.garage61_status.permissions?.length" class="font-mono text-emerald-300">{{ profile.garage61_status.permissions.join(', ') }}</span>
-                            <span v-else class="text-amber-300 font-medium">Solo lectura básica (pendiente que Garage 61 active driving_data / analyses)</span>
-                        </div>
                     </template>
                 </div>
 
                 <form @submit.prevent="saveGarage61" class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-medium text-zinc-300 mb-1">
-                            {{ profile.garage61_connected ? 'Reemplazar Personal Access Token (dejar vacío para mantener)' : 'Personal Access Token de Garage 61' }}
-                        </label>
-                        <input v-model="g61Form.garage61_token" type="password" placeholder="Pega aquí tu token de Garage 61..." class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500" />
-                        <p v-if="g61Form.errors.garage61_token" class="text-xs text-rose-400 mt-1">{{ g61Form.errors.garage61_token }}</p>
-                    </div>
-
                     <label class="flex items-center gap-2.5 text-sm text-zinc-200 cursor-pointer">
                         <input v-model="g61Form.autopilot_enabled" type="checkbox" class="rounded border-zinc-700 bg-zinc-950 text-emerald-500" />
                         <span>Activar <strong>Autopilot en Pista</strong> (descarga referencia térmica automáticamente)</span>
@@ -183,10 +169,10 @@ function revoke(id) {
 
                     <div class="flex items-center justify-between pt-1">
                         <button type="submit" :disabled="g61Form.processing" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition cursor-pointer">
-                            Guardar Integración G61
+                            Guardar Ajustes Autopilot
                         </button>
                         <button v-if="profile.garage61_connected" type="button" @click="g61Form.clear_token = true; saveGarage61()" class="text-xs text-rose-400 hover:underline cursor-pointer">
-                            Desvincular Token
+                            Desvincular cuenta G61
                         </button>
                     </div>
                 </form>

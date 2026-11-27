@@ -330,7 +330,7 @@ class Garage61ClientService
         $apiMsg = (string) ($resp->json('message') ?? '');
 
         if ($status === 403) {
-            return "{$prefix} (HTTP 403 Acceso Denegado). En la API de Garage 61 un Personal Access Token solo tiene permiso para leer tus propias vueltas y las de tus compañeros de equipo (F·R·I·E·N·D·S), o bien el permiso 'driving_data' sigue pendiente de activación en tu token. Si es una vuelta pública de un piloto externo, descárgala como CSV desde la web de Garage 61 y súbela en el formulario izquierdo.";
+            return "{$prefix} (HTTP 403 Acceso Denegado). En la API de Garage 61 por defecto solo tienes acceso a tus propias vueltas y a las de tus compañeros de equipo. Si es una vuelta pública de un piloto externo, descárgala como CSV desde la web de Garage 61 y súbela en la pestaña 'Subir Archivo'.";
         }
         if ($status === 429) {
             return "{$prefix} (HTTP 429 Límite de peticiones de Garage 61 alcanzado, espera unos segundos).";

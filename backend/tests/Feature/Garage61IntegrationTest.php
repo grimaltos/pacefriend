@@ -53,18 +53,18 @@ class Garage61IntegrationTest extends TestCase
             'https://garage61.net/api/v1/laps/*/csv' => Http::response($this->buildSyntheticG61Csv(), 200),
         ]);
 
-        $user = User::factory()->create();
+        $user = User::factory()->create([
+            'garage61_token' => 'g61_oauth_test_secret',
+            'garage61_auth_type' => 'oauth',
+        ]);
 
-        // 1. Save & verify G61 token in Settings
+        // 1. Update Autopilot preferences in Settings
         $this->actingAs($user)->put('/settings/garage61', [
-            'garage61_token' => 'g61_pat_test_secret',
             'autopilot_enabled' => true,
+            'reference_scope' => 'team_then_public',
             'autopilot_mode' => 'progressive',
             'autopilot_delta_ms' => 1000,
         ])->assertSessionHasNoErrors();
-
-        $user->refresh();
-        $this->assertSame('g61_pat_test_secret', $user->garage61_token);
 
         // 2. Paste Garage 61 multi-lap analysis URL
         $this->actingAs($user)->post('/references/garage61/import-url', [

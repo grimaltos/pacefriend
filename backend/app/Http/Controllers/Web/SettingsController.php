@@ -104,10 +104,9 @@ class SettingsController extends Controller
         return redirect('/settings')->with('success', "¡Cuenta de Garage 61 ({$driver}) vinculada automáticamente por OAuth2!");
     }
 
-    public function updateGarage61(Request $request, Garage61ClientService $g61Client): RedirectResponse
+    public function updateGarage61(Request $request): RedirectResponse
     {
         $validated = $request->validate([
-            'garage61_token' => ['nullable', 'string', 'max:1024'],
             'clear_token' => ['nullable', 'boolean'],
             'autopilot_enabled' => ['required', 'boolean'],
             'reference_scope' => ['nullable', 'in:team_only,team_then_public,public_all'],
@@ -131,23 +130,15 @@ class SettingsController extends Controller
             $updates['garage61_auth_type'] = null;
             $updates['garage61_refresh_token'] = null;
             $updates['garage61_token_expires_at'] = null;
-        } elseif (! empty($validated['garage61_token'])) {
-            try {
-                $profile = $g61Client->me($validated['garage61_token']);
-            } catch (RuntimeException $e) {
-                return back()->withErrors(['garage61_token' => $e->getMessage()]);
-            }
-            $updates['garage61_token'] = trim($validated['garage61_token']);
-            $updates['garage61_auth_type'] = 'pat';
-            $updates['garage61_refresh_token'] = null;
-            $updates['garage61_token_expires_at'] = null;
-            $g61Nick = trim(($profile['firstName'] ?? '').' '.($profile['lastName'] ?? '')) ?: ($profile['nickName'] ?? 'conectada');
         }
 
         $user->update($updates);
 
-        $suffix = isset($g61Nick) ? " Cuenta G61 verificada ({$g61Nick})." : '';
-        return back()->with('success', "Configuración de Garage 61 y Autopilot guardada.{$suffix}");
+        $msg = ! empty($validated['clear_token'])
+            ? 'Cuenta de Garage 61 desvinculada.'
+            : 'Preferencias de Autopilot guardadas.';
+
+        return back()->with('success', $msg);
     }
 
     public function createToken(Request $request): RedirectResponse

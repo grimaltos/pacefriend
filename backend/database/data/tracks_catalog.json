@@ -1,0 +1,127 @@
+[
+  {
+    "slug": "spa-up",
+    "name": "Circuit de Spa-Francorchamps",
+    "length_km": 7.004,
+    "corners": [
+      { "turn": 1, "name": "La Source", "brake_pct": 0.980, "apex_pct": 0.012, "exit_pct": 0.032 },
+      { "turn": 5, "name": "Les Combes", "brake_pct": 0.278, "apex_pct": 0.296, "exit_pct": 0.326 },
+      { "turn": 8, "name": "Bruxelles", "brake_pct": 0.428, "apex_pct": 0.449, "exit_pct": 0.474 },
+      { "turn": 10, "name": "No Name", "brake_pct": 0.518, "apex_pct": 0.534, "exit_pct": 0.552 },
+      { "turn": 12, "name": "Pouhon", "brake_pct": 0.614, "apex_pct": 0.631, "exit_pct": 0.656 },
+      { "turn": 14, "name": "Campus / Stavelot", "brake_pct": 0.702, "apex_pct": 0.728, "exit_pct": 0.758 },
+      { "turn": 18, "name": "Bus Stop Chicane", "brake_pct": 0.898, "apex_pct": 0.921, "exit_pct": 0.948 }
+    ]
+  },
+  {
+    "slug": "monza-full",
+    "name": "Autodromo Nazionale Monza",
+    "length_km": 5.793,
+    "corners": [
+      { "turn": 1, "name": "Variante del Rettifilo", "brake_pct": 0.142, "apex_pct": 0.168, "exit_pct": 0.192 },
+      { "turn": 4, "name": "Variante della Roggia", "brake_pct": 0.365, "apex_pct": 0.388, "exit_pct": 0.412 },
+      { "turn": 6, "name": "Lesmo 1", "brake_pct": 0.468, "apex_pct": 0.486, "exit_pct": 0.506 },
+      { "turn": 7, "name": "Lesmo 2", "brake_pct": 0.525, "apex_pct": 0.542, "exit_pct": 0.565 },
+      { "turn": 8, "name": "Variante Ascari", "brake_pct": 0.680, "apex_pct": 0.715, "exit_pct": 0.752 },
+      { "turn": 11, "name": "Parabolica / Alboreto", "brake_pct": 0.885, "apex_pct": 0.920, "exit_pct": 0.960 }
+    ]
+  },
+  {
+    "slug": "watkins-glen-boot",
+    "name": "Watkins Glen International - Boot",
+    "length_km": 5.472,
+    "corners": [
+      { "turn": 1, "name": "The Ninety (Curva 1)", "brake_pct": 0.095, "apex_pct": 0.122, "exit_pct": 0.148 },
+      { "turn": 5, "name": "Bus Stop Inner Loop", "brake_pct": 0.415, "apex_pct": 0.440, "exit_pct": 0.468 },
+      { "turn": 6, "name": "Chute (Curva 6)", "brake_pct": 0.535, "apex_pct": 0.562, "exit_pct": 0.588 },
+      { "turn": 7, "name": "Toe of the Boot", "brake_pct": 0.648, "apex_pct": 0.675, "exit_pct": 0.705 },
+      { "turn": 9, "name": "Curva 9", "brake_pct": 0.805, "apex_pct": 0.830, "exit_pct": 0.855 },
+      { "turn": 11, "name": "Última Curva", "brake_pct": 0.920, "apex_pct": 0.945, "exit_pct": 0.972 }
+    ]
+  },
+  {
+    "slug": "sebring-international",
+    "name": "Sebring International Raceway",
+    "length_km": 6.019,
+    "corners": [
+      { "turn": 1, "name": "Curva 1", "brake_pct": 0.062, "apex_pct": 0.088, "exit_pct": 0.115 },
+      { "turn": 3, "name": "Curvas 3-5", "brake_pct": 0.175, "apex_pct": 0.205, "exit_pct": 0.238 },
+      { "turn": 7, "name": "Hairpin (Horquilla)", "brake_pct": 0.345, "apex_pct": 0.368, "exit_pct": 0.392 },
+      { "turn": 10, "name": "Cunningham", "brake_pct": 0.505, "apex_pct": 0.528, "exit_pct": 0.552 },
+      { "turn": 13, "name": "Tower", "brake_pct": 0.618, "apex_pct": 0.642, "exit_pct": 0.668 },
+      { "turn": 17, "name": "Sunset Bend", "brake_pct": 0.885, "apex_pct": 0.932, "exit_pct": 0.975 }
+    ]
+  },
+  {
+    "slug": "road-atlanta-full",
+    "name": "Michelin Raceway Road Atlanta",
+    "length_km": 4.088,
+    "corners": [
+      { "turn": 1, "name": "Curva 1", "brake_pct": 0.045, "apex_pct": 0.075, "exit_pct": 0.105 },
+      { "turn": 3, "name": "Entrada a las Eses", "brake_pct": 0.165, "apex_pct": 0.192, "exit_pct": 0.220 },
+      { "turn": 6, "name": "Curva 6", "brake_pct": 0.455, "apex_pct": 0.478, "exit_pct": 0.502 },
+      { "turn": 7, "name": "Curva 7 (Recta Trasera)", "brake_pct": 0.525, "apex_pct": 0.548, "exit_pct": 0.575 },
+      { "turn": 10, "name": "Chicane 10a-10b", "brake_pct": 0.760, "apex_pct": 0.788, "exit_pct": 0.822 }
+    ]
+  },
+  {
+    "slug": "daytona-road",
+    "name": "Daytona International Speedway - Road Course",
+    "length_km": 5.729,
+    "corners": [
+      { "turn": 1, "name": "Curva 1 Infield", "brake_pct": 0.075, "apex_pct": 0.105, "exit_pct": 0.135 },
+      { "turn": 3, "name": "International Horseshoe", "brake_pct": 0.215, "apex_pct": 0.242, "exit_pct": 0.270 },
+      { "turn": 5, "name": "West Horseshoe", "brake_pct": 0.342, "apex_pct": 0.368, "exit_pct": 0.395 },
+      { "turn": 6, "name": "Salida al Peralte", "brake_pct": 0.420, "apex_pct": 0.445, "exit_pct": 0.472 },
+      { "turn": 10, "name": "Le Mans Bus Stop", "brake_pct": 0.695, "apex_pct": 0.728, "exit_pct": 0.760 }
+    ]
+  },
+  {
+    "slug": "suzuka-grandprix",
+    "name": "Suzuka International Racing Course",
+    "length_km": 5.807,
+    "corners": [
+      { "turn": 1, "name": "Curva 1-2", "brake_pct": 0.088, "apex_pct": 0.122, "exit_pct": 0.152 },
+      { "turn": 8, "name": "Degner 1-2", "brake_pct": 0.355, "apex_pct": 0.388, "exit_pct": 0.418 },
+      { "turn": 11, "name": "Horquilla", "brake_pct": 0.468, "apex_pct": 0.492, "exit_pct": 0.518 },
+      { "turn": 13, "name": "Spoon", "brake_pct": 0.625, "apex_pct": 0.665, "exit_pct": 0.702 },
+      { "turn": 16, "name": "Casio Triangle Chicane", "brake_pct": 0.875, "apex_pct": 0.908, "exit_pct": 0.942 }
+    ]
+  },
+  {
+    "slug": "imola-gp",
+    "name": "Autodromo Internazionale Enzo e Dino Ferrari",
+    "length_km": 4.909,
+    "corners": [
+      { "turn": 2, "name": "Tamburello", "brake_pct": 0.138, "apex_pct": 0.172, "exit_pct": 0.205 },
+      { "turn": 5, "name": "Villeneuve", "brake_pct": 0.268, "apex_pct": 0.295, "exit_pct": 0.322 },
+      { "turn": 7, "name": "Tosa", "brake_pct": 0.348, "apex_pct": 0.378, "exit_pct": 0.408 },
+      { "turn": 11, "name": "Acque Minerali", "brake_pct": 0.555, "apex_pct": 0.592, "exit_pct": 0.625 },
+      { "turn": 14, "name": "Variante Alta", "brake_pct": 0.708, "apex_pct": 0.735, "exit_pct": 0.762 },
+      { "turn": 17, "name": "Rivazza", "brake_pct": 0.838, "apex_pct": 0.882, "exit_pct": 0.922 }
+    ]
+  },
+  {
+    "slug": "interlagos-gp",
+    "name": "Autódromo José Carlos Pace - Interlagos",
+    "length_km": 4.309,
+    "corners": [
+      { "turn": 1, "name": "S do Senna", "brake_pct": 0.095, "apex_pct": 0.135, "exit_pct": 0.178 },
+      { "turn": 4, "name": "Descida do Lago", "brake_pct": 0.345, "apex_pct": 0.375, "exit_pct": 0.405 },
+      { "turn": 8, "name": "Bico de Pato", "brake_pct": 0.585, "apex_pct": 0.615, "exit_pct": 0.642 },
+      { "turn": 12, "name": "Junção", "brake_pct": 0.742, "apex_pct": 0.772, "exit_pct": 0.805 }
+    ]
+  },
+  {
+    "slug": "nurburgring-gp",
+    "name": "Nürburgring Grand-Prix-Strecke",
+    "length_km": 5.148,
+    "corners": [
+      { "turn": 1, "name": "Curva 1 (Yokohama)", "brake_pct": 0.105, "apex_pct": 0.135, "exit_pct": 0.165 },
+      { "turn": 4, "name": "Mercedes Arena", "brake_pct": 0.215, "apex_pct": 0.252, "exit_pct": 0.285 },
+      { "turn": 7, "name": "Dunlop Kehre", "brake_pct": 0.435, "apex_pct": 0.468, "exit_pct": 0.498 },
+      { "turn": 13, "name": "NGK Chicane", "brake_pct": 0.825, "apex_pct": 0.858, "exit_pct": 0.892 },
+      { "turn": 15, "name": "Coca-Cola Kurve", "brake_pct": 0.922, "apex_pct": 0.952, "exit_pct": 0.980 }
+    ]
+  }
+]

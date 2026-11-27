@@ -1,0 +1,72 @@
+services:
+  app:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pacefriend_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:80"
+    environment:
+      APP_NAME: "PaceFriend"
+      APP_ENV: "${APP_ENV:-production}"
+      APP_KEY: "${APP_KEY}"
+      APP_DEBUG: "${APP_DEBUG:-false}"
+      APP_URL: "${APP_URL:-http://localhost:8080}"
+      APP_LOCALE: "es"
+      DB_CONNECTION: "pgsql"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_DATABASE: "${DB_DATABASE:-pacefriend}"
+      DB_USERNAME: "${DB_USERNAME:-pacefriend}"
+      DB_PASSWORD: "${DB_PASSWORD:-secret}"
+      SESSION_DRIVER: "database"
+      QUEUE_CONNECTION: "database"
+      CACHE_STORE: "database"
+      FILESYSTEM_DISK: "local"
+      PACEFRIEND_VOICE_DRIVER: "${PACEFRIEND_VOICE_DRIVER:-local}"
+      ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY:-}"
+      ELEVENLABS_VOICE_ID: "${ELEVENLABS_VOICE_ID:-pNInz6obpgDQGcFmaJgB}"
+      ELEVENLABS_MODEL_ID: "${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}"
+      PACEFRIEND_LLM_DRIVER: "${PACEFRIEND_LLM_DRIVER:-local}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+    volumes:
+      - pacefriend_storage:/var/www/html/storage
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: pacefriend_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${DB_DATABASE:-pacefriend}"
+      POSTGRES_USER: "${DB_USERNAME:-pacefriend}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-secret}"
+    volumes:
+      - pacefriend_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-pacefriend} -d ${DB_DATABASE:-pacefriend}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Cloudflare Tunnel (activates automatically when COMPOSE_PROFILES=tunnel is set in .env)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: pacefriend_tunnel
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    depends_on:
+      - app
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+
+volumes:
+  pacefriend_pgdata:
+  pacefriend_storage:

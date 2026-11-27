@@ -1,0 +1,29 @@
+# Go binaries & build artifacts
+client/bin/
+client/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+
+# Laravel / PHP / Docker secrets
+.env
+backend/vendor/
+backend/node_modules/
+backend/.env
+backend/.env.backup
+backend/.phpunit.result.cache
+backend/storage/*.key
+backend/storage/app/audio-cache/*
+!backend/storage/app/audio-cache/.gitkeep
+backend/storage/logs/*.log
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

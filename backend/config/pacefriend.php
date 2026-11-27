@@ -1,0 +1,72 @@
+<?php
+
+return [
+    /*
+    |--------------------------------------------------------------------------
+    | Sliding Window & Diagnostic Thresholds
+    |--------------------------------------------------------------------------
+    */
+    'clean_laps_window' => (int) env('PACEFRIEND_CLEAN_LAPS_WINDOW', 5),
+    'outlier_pace_factor' => (float) env('PACEFRIEND_OUTLIER_PACE_FACTOR', 1.08),
+    'min_chronic_occurrences' => (int) env('PACEFRIEND_MIN_CHRONIC_OCCURRENCES', 3),
+    'min_corner_loss_ms' => (int) env('PACEFRIEND_MIN_CORNER_LOSS_MS', 80),
+    'normalization_grid_points' => 250, // Every 0.4% of track (0.000 .. 0.996)
+
+    /*
+    |--------------------------------------------------------------------------
+    | Dynamic Track-Condition Reference Matching
+    |--------------------------------------------------------------------------
+    */
+    'matching' => [
+        'track_temp_weight' => 0.75,
+        'air_temp_weight' => 0.25,
+        'thermal_band_c' => 3.0,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Natural AI Voice Synthesis (ElevenLabs + Local Dev Fallback)
+    |--------------------------------------------------------------------------
+    */
+    'voice' => [
+        'driver' => env('PACEFRIEND_VOICE_DRIVER', 'local'), // local | elevenlabs
+        'elevenlabs' => [
+            'api_key' => env('ELEVENLABS_API_KEY'),
+            'voice_id' => env('ELEVENLABS_VOICE_ID', 'pNInz6obpgDQGcFmaJgB'),
+            'model_id' => env('ELEVENLABS_MODEL_ID', 'eleven_multilingual_v2'),
+            'stability' => 0.55,
+            'similarity_boost' => 0.80,
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | PRO Post-Session Report LLM Narrator (Gemini / OpenAI / Local Engineer)
+    |--------------------------------------------------------------------------
+    */
+    'llm' => [
+        'driver' => env('PACEFRIEND_LLM_DRIVER', 'local'), // local | gemini | openai
+        'gemini' => [
+            'api_key' => env('GEMINI_API_KEY'),
+            'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
+        ],
+        'openai' => [
+            'api_key' => env('OPENAI_API_KEY'),
+            'model' => env('OPENAI_MODEL', 'gpt-4o-mini'),
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Garage 61 Developer API & Progressive Autopilot
+    |--------------------------------------------------------------------------
+    */
+    'garage61' => [
+        'base_url' => env('GARAGE61_API_URL', 'https://garage61.net/api/v1'),
+        'max_lap_age_days' => (int) env('GARAGE61_MAX_LAP_AGE_DAYS', 90),
+        'autopilot_temp_band_c' => 2.5,
+        'progressive_min_faster_ms' => 600,
+        'progressive_max_faster_ms' => 1600,
+        'level_up_threshold_ms' => 250,
+    ],
+];

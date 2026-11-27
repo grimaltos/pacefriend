@@ -1,0 +1,235 @@
+//go:build windows
+
+package irsdk
+
+import (
+	"context"
+	"fmt"
+	"syscall"
+	"unsafe"
+
+	"github.com/pacefriend/client/internal/telemetry"
+)
+
+const fileMapRead = 0x0004
+
+var (
+	kernel32            = syscall.NewLazyDLL("kernel32.dll")
+	procOpenFileMapping = kernel32.NewProc("OpenFileMappingW")
+	procMapViewOfFile   = kernel32.NewProc("MapViewOfFile")
+	procUnmapViewOfFile = kernel32.NewProc("UnmapViewOfFile")
+	procVirtualQuery    = kernel32.NewProc("VirtualQuery")
+)
+
+// memoryBasicInformation matches Win32 MEMORY_BASIC_INFORMATION on both amd64 (48B) and 386 (28B).
+type memoryBasicInformation struct {
+	BaseAddress       uintptr
+	AllocationBase    uintptr
+	AllocationProtect uint32
+	RegionSize        uintptr
+	State             uint32
+	Protect           uint32
+	Type              uint32
+}
+
+// SharedMemorySource connects directly to iRacing's Windows shared memory mapping
+// via Win32 syscalls (OpenFileMappingW + MapViewOfFile) with zero CGO overhead.
+type SharedMemorySource struct {
+	preferredName   string
+	activeName      string
+	mappingHandle   syscall.Handle
+	viewAddr        uintptr
+	mem             []byte
+	varIndex        *VarIndex
+	lastSessionUpd  int32
+	lastNumVars     int32
+	lastVarHdrOff   int32
+	sessionMetadata telemetry.SessionMetadata
+}
+
+// NewSharedMemorySource creates a native Windows shared memory telemetry reader.
+// If shmName is empty, it tries Local\IRacingData first and falls back automatically
+// to Local\IRacingMemMapFileName.
+func NewSharedMemorySource(shmName string) *SharedMemorySource {
+	return &SharedMemorySource{
+		preferredName:  shmName,
+		lastSessionUpd: -1,
+	}
+}
+
+// Connect opens the Windows file mapping and maps its entire read-only view into process address space.
+func (s *SharedMemorySource) Connect(_ context.Context) error {
+	_ = s.Close()
+
+	candidates := s.candidateNames()
+	var lastErr error
+	var handle syscall.Handle
+	var chosen string
+
+	for _, name := range candidates {
+		h, err := openFileMappingReadOnly(name)
+		if err == nil {
+			handle = h
+			chosen = name
+			break
+		}
+		lastErr = err
+	}
+	if handle == 0 {
+		return fmt.Errorf("open shared memory (%v): %w", candidates, lastErr)
+	}
+
+	addr, _, mapErr := procMapViewOfFile.Call(
+		uintptr(handle),
+		uintptr(fileMapRead),
+		0,
+		0,
+		0, // 0 maps the full shared memory object
+	)
+	if addr == 0 {
+		_ = syscall.CloseHandle(handle)
+		return fmt.Errorf("MapViewOfFile(%s): %w", chosen, mapErr)
+	}
+
+	regionSize, err := queryMappedRegionSize(addr)
+	if err != nil || regionSize < HeaderSize {
+		_, _, _ = procUnmapViewOfFile.Call(addr)
+		_ = syscall.CloseHandle(handle)
+		return fmt.Errorf("VirtualQuery(%s): size=%d err=%w", chosen, regionSize, err)
+	}
+
+	s.mappingHandle = handle
+	s.viewAddr = addr
+	s.activeName = chosen
+	s.mem = unsafe.Slice((*byte)(unsafe.Pointer(addr)), regionSize)
+	s.lastSessionUpd = -1
+	s.varIndex = nil
+
+	// Perform initial header validation & variable offset indexing if already connected.
+	var hdr Header
+	if err := ParseHeader(s.mem, &hdr); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if hdr.NumVars > 0 && hdr.BufLen > 0 {
+		idx, err := IndexVariables(s.mem, &hdr)
+		if err != nil {
+			_ = s.Close()
+			return err
+		}
+		s.varIndex = idx
+		s.lastNumVars = hdr.NumVars
+		s.lastVarHdrOff = hdr.VarHeaderOffset
+		s.refreshSessionMetadataIfNeeded(&hdr)
+	}
+
+	return nil
+}
+
+// ReadFrame reads the newest 60 Hz sample from mapped memory in O(1) with 0 allocations.
+func (s *SharedMemorySource) ReadFrame(out *telemetry.RawFrame) (bool, error) {
+	if len(s.mem) < HeaderSize {
+		return false, ErrMemoryTooSmall
+	}
+
+	var hdr Header
+	if err := ParseHeader(s.mem, &hdr); err != nil {
+		return false, err
+	}
+	if hdr.Status&StatusConnected == 0 {
+		return false, nil
+	}
+
+	// Re-index dynamically if iRacing initialized or updated the variable table.
+	if s.varIndex == nil || hdr.NumVars != s.lastNumVars || hdr.VarHeaderOffset != s.lastVarHdrOff {
+		idx, err := IndexVariables(s.mem, &hdr)
+		if err != nil {
+			return false, err
+		}
+		s.varIndex = idx
+		s.lastNumVars = hdr.NumVars
+		s.lastVarHdrOff = hdr.VarHeaderOffset
+	}
+
+	// Re-parse SessionInfo YAML only when iRacing increments sessionInfoUpdate.
+	s.refreshSessionMetadataIfNeeded(&hdr)
+
+	return ReadFrameFromMemory(s.mem, s.varIndex, out)
+}
+
+// SessionMetadata returns the latest parsed track & car metadata.
+func (s *SharedMemorySource) SessionMetadata() telemetry.SessionMetadata {
+	return s.sessionMetadata
+}
+
+// Close unmaps the memory view and closes the Win32 file mapping handle.
+func (s *SharedMemorySource) Close() error {
+	var firstErr error
+	if s.viewAddr != 0 {
+		r1, _, err := procUnmapViewOfFile.Call(s.viewAddr)
+		if r1 == 0 && firstErr == nil {
+			firstErr = err
+		}
+		s.viewAddr = 0
+	}
+	s.mem = nil
+	s.varIndex = nil
+	if s.mappingHandle != 0 {
+		if err := syscall.CloseHandle(s.mappingHandle); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.mappingHandle = 0
+	}
+	return firstErr
+}
+
+func (s *SharedMemorySource) refreshSessionMetadataIfNeeded(hdr *Header) {
+	if hdr.SessionInfoUpdate == s.lastSessionUpd {
+		return
+	}
+	start := int(hdr.SessionInfoOffset)
+	end := start + int(hdr.SessionInfoLen)
+	if start >= HeaderSize && end > start && end <= len(s.mem) {
+		s.sessionMetadata = ParseSessionInfoYAML(s.mem[start:end])
+		s.lastSessionUpd = hdr.SessionInfoUpdate
+	}
+}
+
+func (s *SharedMemorySource) candidateNames() []string {
+	if s.preferredName != "" {
+		if s.preferredName == SpecShmName {
+			return []string{SpecShmName, OfficialShmName}
+		}
+		return []string{s.preferredName}
+	}
+	return []string{SpecShmName, OfficialShmName}
+}
+
+func openFileMappingReadOnly(name string) (syscall.Handle, error) {
+	utf16Name, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return 0, err
+	}
+	r1, _, callErr := procOpenFileMapping.Call(
+		uintptr(fileMapRead),
+		0,
+		uintptr(unsafe.Pointer(utf16Name)),
+	)
+	if r1 == 0 {
+		return 0, callErr
+	}
+	return syscall.Handle(r1), nil
+}
+
+func queryMappedRegionSize(addr uintptr) (int, error) {
+	var mbi memoryBasicInformation
+	r1, _, callErr := procVirtualQuery.Call(
+		addr,
+		uintptr(unsafe.Pointer(&mbi)),
+		unsafe.Sizeof(mbi),
+	)
+	if r1 == 0 {
+		return 0, callErr
+	}
+	return int(mbi.RegionSize), nil
+}

@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +24,11 @@ import (
 	"github.com/pacefriend/client/internal/tray"
 )
 
+type heartbeatState struct {
+	state     string
+	trackName string
+}
+
 func main() {
 	fileCfg := config.LoadAdjacent()
 
@@ -28,7 +36,7 @@ func main() {
 		apiURL     = flag.String("api-url", firstNonEmpty(os.Getenv("PACEFRIEND_API_URL"), fileCfg.APIURL, ""), "Base URL of PaceFriend Laravel API")
 		apiToken   = flag.String("api-token", firstNonEmpty(os.Getenv("PACEFRIEND_API_TOKEN"), fileCfg.APIToken, ""), "Bearer token for API authentication")
 		userID     = flag.String("user-id", firstNonEmpty(os.Getenv("PACEFRIEND_USER_ID"), fileCfg.UserID, "driver-local"), "Driver identifier")
-		shmName    = flag.String("shm-name", firstNonEmpty(os.Getenv("PACEFRIEND_SHM_NAME"), fileCfg.ShmName, irsdk.SpecShmName), `Windows shared memory block name`)
+		shmName    = flag.String("shm-name", firstNonEmpty(os.Getenv("PACEFRIEND_SHM_NAME"), fileCfg.ShmName, irsdk.OfficialShmName), `Windows shared memory block name`)
 		rateHz     = flag.Int("hz", 20, "Telemetry sampling frequency in Hz")
 		simMode    = flag.Bool("sim", false, "Use built-in synthetic iRacing memory simulator (for Linux/offline testing)")
 		simSpeedup = flag.Float64("sim-speedup", 10.0, "Time multiplier when -sim is enabled")
@@ -39,7 +47,12 @@ func main() {
 	)
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	logWriter, logFile := openDiagnosticLog(*simMode)
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
@@ -56,10 +69,15 @@ func main() {
 	defer speaker.Close()
 	evaluator := coaching.NewEvaluator(speaker)
 
+	initialTrayStatus := "Esperando sesión de iRacing..."
+	if !*simMode && (*apiURL == "" || *apiToken == "") {
+		initialTrayStatus = "Sin pacefriend.json (extrae todo el ZIP)"
+	}
+
 	var trayMgr *tray.Manager
 	if !*noTray && !*simMode {
 		trayMgr = tray.Start(tray.Options{
-			InitialStatus: "Esperando sesión de iRacing...",
+			InitialStatus: initialTrayStatus,
 			PanelURL:      *apiURL,
 			IsMuted:       speaker.IsMuted,
 			OnToggleMute: func() {
@@ -103,6 +121,16 @@ func main() {
 	uploader.Start(ctx)
 	defer uploader.Close()
 
+	var hbState atomic.Value
+	hbState.Store(heartbeatState{state: "waiting_iracing", trackName: ""})
+
+	// Immediate & periodic heartbeat so the web panel shows "Cliente Conectado" right away
+	if *apiURL != "" && *apiToken != "" {
+		go runHeartbeatLoop(ctx, uploader, logger, trayMgr, &hbState)
+	} else if !*simMode {
+		logger.Warn("missing api_url or api_token; ensure pacefriend.json is in the same folder as pacefriend-client.exe")
+	}
+
 	var source telemetry.Source
 	if *simMode {
 		logger.Info("starting PaceFriend client in simulator mode",
@@ -117,18 +145,50 @@ func main() {
 	} else {
 		logger.Info("starting PaceFriend client (native Windows shared memory)",
 			slog.String("shm_name", *shmName),
+			slog.String("api_url", *apiURL),
 			slog.Int("hz", *rateHz),
 		)
 		source = irsdk.NewSharedMemorySource(*shmName)
 	}
 	defer source.Close()
 
-	runLoop(ctx, logger, source, ring, pool, evaluator, uploader, trayMgr, engine.Config{
+	runLoop(ctx, logger, source, ring, pool, evaluator, uploader, trayMgr, &hbState, engine.Config{
 		UserID:       *userID,
 		SampleRateHz: *rateHz,
 		MaxLaps:      *simLaps,
 		Logger:       logger,
-	}, *simMode)
+	}, *simMode, *apiURL != "" && *apiToken != "")
+}
+
+func runHeartbeatLoop(
+	ctx context.Context,
+	uploader *transport.Uploader,
+	logger *slog.Logger,
+	trayMgr *tray.Manager,
+	hbState *atomic.Value,
+) {
+	sendOnce := func() {
+		st, _ := hbState.Load().(heartbeatState)
+		if err := uploader.SendHeartbeat(ctx, st.state, st.trackName); err != nil {
+			logger.Warn("heartbeat failed", slog.Any("err", err))
+			if st.state == "waiting_iracing" && trayMgr != nil {
+				trayMgr.SetStatus("Error API (" + err.Error() + ")")
+			}
+		}
+	}
+
+	sendOnce()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sendOnce()
+		}
+	}
 }
 
 func runLoop(
@@ -140,8 +200,10 @@ func runLoop(
 	evaluator *coaching.Evaluator,
 	uploader *transport.Uploader,
 	trayMgr *tray.Manager,
+	hbState *atomic.Value,
 	cfg engine.Config,
 	simMode bool,
+	hasConfig bool,
 ) {
 	loggedWait := false
 
@@ -152,8 +214,11 @@ func runLoop(
 				return
 			}
 			if !loggedWait {
-				logger.Info("waiting for iRacing session in shared memory...", slog.Any("detail", err))
-				trayMgr.SetStatus("Esperando sesión de iRacing...")
+				logger.Info("waiting for iRacing 3D simulator session in shared memory...", slog.Any("detail", err))
+				if hasConfig {
+					trayMgr.SetStatus("Conectado · Esperando pista iRacing...")
+				}
+				hbState.Store(heartbeatState{state: "waiting_iracing", trackName: ""})
 				loggedWait = true
 			}
 			select {
@@ -166,14 +231,19 @@ func runLoop(
 
 		loggedWait = false
 		meta := source.SessionMetadata()
-		logger.Info("connected to telemetry memory",
+		logger.Info("connected to iRacing telemetry memory",
 			slog.String("track", meta.TrackName),
 			slog.String("car", meta.CarName),
 		)
+
 		if meta.TrackName != "" {
 			trayMgr.SetStatus("En pista: " + meta.TrackName)
 		} else {
-			trayMgr.SetStatus("Conectado a iRacing")
+			trayMgr.SetStatus("iRacing detectado (cargando sesión)")
+		}
+		hbState.Store(heartbeatState{state: "in_session", trackName: meta.TrackName})
+		if hasConfig {
+			_ = uploader.SendHeartbeat(ctx, "in_session", meta.TrackName)
 		}
 
 		ring.Reset()
@@ -191,13 +261,31 @@ func runLoop(
 		}
 
 		logger.Warn("telemetry stream interrupted, will retry connection", slog.Any("err", err))
-		trayMgr.SetStatus("Esperando sesión de iRacing...")
+		hbState.Store(heartbeatState{state: "waiting_iracing", trackName: ""})
+		if hasConfig {
+			trayMgr.SetStatus("Conectado · Esperando pista iRacing...")
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func openDiagnosticLog(simMode bool) (io.Writer, *os.File) {
+	if simMode {
+		return os.Stdout, nil
+	}
+	logPath := "pacefriend.log"
+	if exe, err := os.Executable(); err == nil {
+		logPath = filepath.Join(filepath.Dir(exe), "pacefriend.log")
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return os.Stdout, nil
+	}
+	return io.MultiWriter(os.Stdout, f), f
 }
 
 func firstNonEmpty(values ...string) string {

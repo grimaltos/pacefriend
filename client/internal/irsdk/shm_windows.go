@@ -11,7 +11,10 @@ import (
 	"github.com/pacefriend/client/internal/telemetry"
 )
 
-const fileMapRead = 0x0004
+const (
+	fileMapRead = 0x0004
+	memCommit   = 0x1000
+)
 
 var (
 	kernel32            = syscall.NewLazyDLL("kernel32.dll")
@@ -197,12 +200,15 @@ func (s *SharedMemorySource) refreshSessionMetadataIfNeeded(hdr *Header) {
 
 func (s *SharedMemorySource) candidateNames() []string {
 	if s.preferredName != "" {
+		if s.preferredName == OfficialShmName {
+			return []string{OfficialShmName, SpecShmName}
+		}
 		if s.preferredName == SpecShmName {
-			return []string{SpecShmName, OfficialShmName}
+			return []string{OfficialShmName, SpecShmName}
 		}
 		return []string{s.preferredName}
 	}
-	return []string{SpecShmName, OfficialShmName}
+	return []string{OfficialShmName, SpecShmName}
 }
 
 func openFileMappingReadOnly(name string) (syscall.Handle, error) {
@@ -222,14 +228,31 @@ func openFileMappingReadOnly(name string) (syscall.Handle, error) {
 }
 
 func queryMappedRegionSize(addr uintptr) (int, error) {
-	var mbi memoryBasicInformation
-	r1, _, callErr := procVirtualQuery.Call(
-		addr,
-		uintptr(unsafe.Pointer(&mbi)),
-		unsafe.Sizeof(mbi),
-	)
-	if r1 == 0 {
-		return 0, callErr
+	var total uintptr
+	cur := addr
+
+	for i := 0; i < 512; i++ {
+		var mbi memoryBasicInformation
+		r1, _, callErr := procVirtualQuery.Call(
+			cur,
+			uintptr(unsafe.Pointer(&mbi)),
+			unsafe.Sizeof(mbi),
+		)
+		if r1 == 0 {
+			if total > 0 {
+				break
+			}
+			return 0, callErr
+		}
+		if i > 0 && mbi.AllocationBase != addr {
+			break
+		}
+		if mbi.State != memCommit || mbi.RegionSize == 0 {
+			break
+		}
+		total += mbi.RegionSize
+		cur = mbi.BaseAddress + mbi.RegionSize
 	}
-	return int(mbi.RegionSize), nil
+
+	return int(total), nil
 }

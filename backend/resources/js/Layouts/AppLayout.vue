@@ -8,8 +8,17 @@ const flash = computed(() => page.props.flash || {});
 
 const clientOnline = computed(() => {
     if (!user.value?.last_client_seen_at) return false;
+    if (user.value?.client_state === 'offline') return false;
     const diffMin = (Date.now() - new Date(user.value.last_client_seen_at).getTime()) / 60000;
-    return diffMin <= 10;
+    return diffMin <= 2.5;
+});
+
+const clientBadgeText = computed(() => {
+    if (!clientOnline.value) return 'Cliente desconectado';
+    if (user.value?.client_state === 'in_session') {
+        return user.value?.client_track ? `En pista · ${user.value.client_track}` : 'Cliente en Pista';
+    }
+    return 'Cliente activo (esperando iRacing)';
 });
 
 function logout() {
@@ -48,8 +57,8 @@ function logout() {
 
                 <div class="flex items-center gap-4 text-sm">
                     <div class="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full border border-zinc-800 bg-zinc-900 text-xs">
-                        <span :class="clientOnline ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'" class="w-2 h-2 rounded-full"></span>
-                        <span class="text-zinc-300">{{ clientOnline ? 'Cliente en Pista' : 'Cliente desconectado' }}</span>
+                        <span :class="clientOnline ? (user?.client_state === 'in_session' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400') : 'bg-zinc-600'" class="w-2 h-2 rounded-full"></span>
+                        <span class="text-zinc-300">{{ clientBadgeText }}</span>
                     </div>
 
                     <div v-if="user" class="text-right hidden sm:block">

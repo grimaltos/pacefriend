@@ -10,6 +10,7 @@ Route::prefix('v1')->group(function () {
 
     // Sanctum-authenticated client telemetry endpoints
     Route::middleware('auth:sanctum')->group(function () {
+        Route::post('/telemetry/heartbeat', [TelemetryLapController::class, 'heartbeat'])->name('api.v1.telemetry.heartbeat');
         Route::post('/telemetry/lap', [TelemetryLapController::class, 'store'])->name('api.v1.telemetry.lap');
         Route::post('/telemetry/session/end', [TelemetryLapController::class, 'endSession'])->name('api.v1.telemetry.session.end');
     });

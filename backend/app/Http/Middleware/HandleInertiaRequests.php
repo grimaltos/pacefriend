@@ -29,6 +29,8 @@ class HandleInertiaRequests extends Middleware
                     'effective_callsign' => $user->effectiveCallsign(),
                     'callsign_phonetic' => $user->callsign_phonetic,
                     'last_client_seen_at' => $user->last_client_seen_at?->toIso8601String(),
+                    'client_state' => $user->preferences['client_state'] ?? null,
+                    'client_track' => $user->preferences['client_track'] ?? null,
                 ] : null,
             ],
             'flash' => [

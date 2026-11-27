@@ -165,10 +165,35 @@ class TelemetryLapController extends Controller
         ], 201);
     }
 
+    public function heartbeat(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'state' => ['nullable', 'string', 'max:40'],
+            'track_name' => ['nullable', 'string', 'max:180'],
+        ]);
+
+        /** @var User $user */
+        $user = $request->user();
+        $prefs = $user->preferences ?? [];
+        $prefs['client_state'] = $validated['state'] ?? 'waiting_iracing';
+        $prefs['client_track'] = $validated['track_name'] ?? '';
+
+        $user->forceFill([
+            'last_client_seen_at' => now(),
+            'preferences' => $prefs,
+        ])->save();
+
+        return response()->json(['status' => 'ok']);
+    }
+
     public function endSession(Request $request): JsonResponse
     {
         /** @var User $user */
         $user = $request->user();
+        $prefs = $user->preferences ?? [];
+        $prefs['client_state'] = 'offline';
+        $prefs['client_track'] = '';
+        $user->forceFill(['preferences' => $prefs])->save();
 
         $openSession = DrivingSession::query()
             ->where('user_id', $user->id)

@@ -113,6 +113,42 @@ func (u *Uploader) Close() {
 	u.notifySessionEnd()
 }
 
+// SendHeartbeat notifies the PaceFriend web panel that the local Windows client is online
+// and reports its current status (e.g. waiting for iRacing vs connected on track).
+func (u *Uploader) SendHeartbeat(ctx context.Context, state string, trackName string) error {
+	if u.baseURL == "" {
+		return fmt.Errorf("missing api_url (check pacefriend.json)")
+	}
+	hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	payload, _ := json.Marshal(map[string]string{
+		"state":      state,
+		"track_name": trackName,
+	})
+
+	req, err := http.NewRequestWithContext(hbCtx, http.MethodPost, u.baseURL+"/api/v1/telemetry/heartbeat", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if u.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.apiToken)
+	}
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("heartbeat HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (u *Uploader) notifySessionEnd() {
 	if u.baseURL == "" {
 		return

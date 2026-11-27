@@ -24,6 +24,7 @@ use Laravel\Sanctum\HasApiTokens;
     'garage61_refresh_token',
     'garage61_token_expires_at',
     'autopilot_enabled',
+    'reference_scope',
     'autopilot_mode',
     'autopilot_delta_ms',
     'last_client_seen_at',

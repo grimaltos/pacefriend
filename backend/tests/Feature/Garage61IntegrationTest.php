@@ -321,6 +321,66 @@ class Garage61IntegrationTest extends TestCase
         $this->assertSame('oauth_refreshed_access_999', $freshToken);
     }
 
+    public function test_reference_pinning_priority_and_autopilot_cache_pruning(): void
+    {
+        $user = User::factory()->create([
+            'reference_scope' => 'team_only',
+            'autopilot_mode' => 'progressive',
+        ]);
+        $spa = \App\Models\Track::query()->where('slug', 'spa-up')->firstOrFail();
+
+        // Create an unpinned faster autopilot lap and a slightly slower team setup lap
+        $autoRef = ReferenceLap::query()->create([
+            'user_id' => $user->id,
+            'track_id' => $spa->id,
+            'car_name' => 'Porsche 911 GT3 R (992)',
+            'label' => 'Auto G61',
+            'lap_time_ms' => 136500,
+            'track_temp_c' => 28.0,
+            'air_temp_c' => 21.0,
+            'is_wet' => false,
+            'is_pinned' => false,
+            'source' => 'garage61_autopilot',
+            'normalized_points' => [],
+            'corner_baselines' => [],
+        ]);
+
+        $teamMasterRef = ReferenceLap::query()->create([
+            'user_id' => $user->id,
+            'track_id' => $spa->id,
+            'car_name' => 'Porsche 911 GT3 R (992)',
+            'label' => 'Setup Equipo 24h',
+            'lap_time_ms' => 137200,
+            'track_temp_c' => 29.0,
+            'air_temp_c' => 21.0,
+            'is_wet' => false,
+            'is_pinned' => false,
+            'source' => 'garage61_manual',
+            'normalized_points' => [],
+            'corner_baselines' => [],
+        ]);
+
+        // Pin the team master lap
+        $this->actingAs($user)
+            ->post("/references/{$teamMasterRef->id}/pin")
+            ->assertRedirect();
+
+        $this->assertTrue($teamMasterRef->fresh()->is_pinned);
+
+        // Verify matcher prioritizes the pinned team lap at 28 °C
+        $matcher = app(\App\Services\Coaching\ReferenceMatcherService::class);
+        $selected = $matcher->selectBestReference($user->id, $spa->id, 'Porsche 911 GT3 R (992)', 28.0, 21.0, false);
+        $this->assertSame($teamMasterRef->id, $selected?->id);
+
+        // Prune autopilot cache -> deletes unpinned autoRef while preserving teamMasterRef
+        $this->actingAs($user)
+            ->delete('/references/prune?mode=autopilot')
+            ->assertRedirect();
+
+        $this->assertDatabaseMissing('reference_laps', ['id' => $autoRef->id]);
+        $this->assertDatabaseHas('reference_laps', ['id' => $teamMasterRef->id]);
+    }
+
     private function buildSyntheticG61Csv(): string
     {
         $rows = ['LapDistPct,Speed,Throttle,Brake,Gear,LapCurrentLapTime'];

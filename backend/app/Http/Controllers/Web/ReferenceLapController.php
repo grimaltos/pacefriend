@@ -40,12 +40,14 @@ class ReferenceLapController extends Controller
             ->where(static function ($q) use ($user) {
                 $q->where('user_id', $user->id)->orWhereNull('user_id');
             })
+            ->orderByRaw('CASE WHEN is_pinned THEN 0 ELSE 1 END')
             ->orderByRaw('CASE WHEN user_id IS NULL THEN 1 ELSE 0 END')
-            ->orderByDesc('created_at')
+            ->orderBy('track_temp_c')
             ->get()
             ->map(static fn (ReferenceLap $r) => [
                 'id' => $r->id,
                 'is_owned' => $r->user_id === $user->id,
+                'is_pinned' => (bool) $r->is_pinned,
                 'label' => $r->label ?: "{$r->car_name} ({$r->track_temp_c} °C)",
                 'car_name' => $r->car_name,
                 'driver_name' => $r->driver_name,
@@ -320,6 +322,37 @@ class ReferenceLapController extends Controller
         ]);
 
         return back()->with('success', "Vuelta #{$lap->lap_number} guardada en tu biblioteca de referencias ({$lap->track_temp_c} °C).");
+    }
+
+    public function togglePin(Request $request, ReferenceLap $referenceLap): RedirectResponse
+    {
+        abort_unless($referenceLap->user_id === $request->user()->id, 403);
+
+        $referenceLap->update(['is_pinned' => ! $referenceLap->is_pinned]);
+        $msg = $referenceLap->is_pinned
+            ? "Referencia fijada (📌): el coach la priorizará sobre el resto."
+            : 'Referencia desfijada.';
+
+        return back()->with('success', $msg);
+    }
+
+    public function pruneStale(Request $request): RedirectResponse
+    {
+        $mode = (string) $request->input('mode', 'autopilot');
+        $query = ReferenceLap::query()
+            ->where('user_id', $request->user()->id)
+            ->where('is_pinned', false);
+
+        if ($mode === 'older_90d') {
+            $query->where('created_at', '<', now()->subDays(90));
+            $deleted = $query->delete();
+            return back()->with('success', "Se limpiaron {$deleted} referencias antiguas (> 90 días, no fijadas).");
+        }
+
+        $query->where('source', 'garage61_autopilot');
+        $deleted = $query->delete();
+
+        return back()->with('success', "Se limpiaron {$deleted} referencias auto-cacheadas por Autopilot.");
     }
 
     public function destroy(Request $request, ReferenceLap $referenceLap): RedirectResponse

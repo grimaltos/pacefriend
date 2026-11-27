@@ -7,8 +7,11 @@ use App\Models\ReferenceLap;
 class ReferenceMatcherService
 {
     /**
-     * Select the optimal ReferenceLap whose track conditions (wet/dry, asphalt temp, air temp)
-     * most closely match the current session while offering the fastest benchmark within the thermal band.
+     * Select the optimal ReferenceLap matching surface conditions:
+     * 1. Identical wet/dry grip regime when available.
+     * 2. User-pinned (📌) references within ±8 °C take top priority (closest thermal match, then fastest).
+     * 3. Otherwise, within ±3 °C of the closest available reference, prefer curated user laps
+     *    over autopilot-cached laps over system seeds, breaking ties by fastest lap_time_ms.
      */
     public function selectBestReference(
         int $userId,
@@ -30,7 +33,6 @@ class ReferenceMatcherService
             return null;
         }
 
-        // Prioritize identical wet/dry grip regime when available.
         $sameSurface = $candidates->where('is_wet', $isWet);
         $pool = $sameSurface->isNotEmpty() ? $sameSurface : $candidates;
 
@@ -42,22 +44,41 @@ class ReferenceMatcherService
             $distance = ($wTrack * abs($trackTempC - $ref->track_temp_c))
                 + ($wAir * abs($airTempC - $ref->air_temp_c));
 
+            $tier = 0; // global seed
+            if ($ref->user_id === $userId) {
+                $tier = $ref->source === 'garage61_autopilot' ? 1 : 2; // curated > autopilot > global
+            }
+
             return [
                 'ref' => $ref,
                 'distance' => $distance,
-                'is_owned' => $ref->user_id === $userId,
+                'is_pinned' => (bool) $ref->is_pinned && $ref->user_id === $userId,
+                'tier' => $tier,
             ];
         });
 
+        // 1. Check user-pinned references within ±8 °C weighted thermal distance
+        $pinned = $scored
+            ->filter(static fn (array $item) => $item['is_pinned'] && $item['distance'] <= 8.0)
+            ->sort(static function (array $a, array $b) {
+                if (abs($a['distance'] - $b['distance']) > 2.0) {
+                    return $a['distance'] <=> $b['distance'];
+                }
+                return $a['ref']->lap_time_ms <=> $b['ref']->lap_time_ms;
+            });
+
+        if ($pinned->isNotEmpty()) {
+            return $pinned->first()['ref'];
+        }
+
+        // 2. Standard thermal band matching
         $minDistance = (float) $scored->min('distance');
 
-        // Within a narrow thermal band (±3 °C weighted) grip is comparable; pick the fastest reference
-        // (preferring user's own uploaded reference laps on close ties).
         $withinBand = $scored
             ->filter(static fn (array $item) => $item['distance'] <= ($minDistance + $thermalBand))
             ->sort(static function (array $a, array $b) {
-                if ($a['is_owned'] !== $b['is_owned']) {
-                    return $b['is_owned'] <=> $a['is_owned'];
+                if ($a['tier'] !== $b['tier']) {
+                    return $b['tier'] <=> $a['tier'];
                 }
                 return $a['ref']->lap_time_ms <=> $b['ref']->lap_time_ms;
             });

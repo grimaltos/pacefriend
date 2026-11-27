@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'track_temp_c',
     'air_temp_c',
     'is_wet',
+    'is_pinned',
     'track_usage',
     'source',
     'external_id',
@@ -31,6 +32,7 @@ class ReferenceLap extends Model
             'track_temp_c' => 'float',
             'air_temp_c' => 'float',
             'is_wet' => 'boolean',
+            'is_pinned' => 'boolean',
             'normalized_points' => 'array',
             'corner_baselines' => 'array',
         ];

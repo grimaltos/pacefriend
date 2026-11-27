@@ -100,20 +100,14 @@ class Garage61ImporterService
         }
         if ($onlyTeam) {
             $teams = $this->client->listTeams($token);
-            // OpenAPI line 698: `teams` expects team SLUGS, not IDs!
             $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
-            if ($teamSlugs !== []) {
-                $query['teams'] = implode(',', $teamSlugs);
-            }
-        } else {
-            // Include user's own laps, followed drivers, AND all joined team slugs!
-            $teams = $this->client->listTeams($token);
-            $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
-            $query['drivers'] = 'me,following';
+            $query['drivers'] = 'me';
             if ($teamSlugs !== []) {
                 $query['teams'] = implode(',', $teamSlugs);
             }
         }
+        // When $onlyTeam is false, omit `drivers` and `teams` so Garage 61 searches all laps visible
+        // to the token (public community if approved by G61, or user + teammates by default).
 
         $laps = $this->client->searchLaps($token, $query);
 
@@ -203,6 +197,11 @@ class Garage61ImporterService
         $levelUpThresholdMs = (int) config('pacefriend.garage61.level_up_threshold_ms', 250);
         $currentRef = $session->activeReferenceLap;
 
+        // Never override a user-pinned master reference lap with matching wet/dry surface
+        if ($currentRef !== null && $currentRef->is_pinned && $currentRef->is_wet === $session->is_wet) {
+            return $currentRef;
+        }
+
         $hasThermalMatch = $currentRef !== null
             && $currentRef->is_wet === $session->is_wet
             && abs($currentRef->track_temp_c - $session->avg_track_temp_c) <= $tempBand;
@@ -223,25 +222,17 @@ class Garage61ImporterService
                 return null;
             }
 
-            $teams = $this->client->listTeams($token);
-            $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
-
-            $query = [
+            $baseQuery = [
                 'tracks' => (string) $ids['track_id'],
                 'minConditionsTrackTemp' => round($session->avg_track_temp_c - $tempBand, 1),
                 'maxConditionsTrackTemp' => round($session->avg_track_temp_c + $tempBand, 1),
             ];
             if ($ids['car_id'] !== null) {
-                $query['cars'] = (string) $ids['car_id'];
-            }
-            if ($teamSlugs !== []) {
-                $query['teams'] = implode(',', $teamSlugs);
-            }
-            if ($user->autopilot_mode !== 'team') {
-                $query['drivers'] = 'me,following';
+                $baseQuery['cars'] = (string) $ids['car_id'];
             }
 
-            $candidates = $this->client->searchLaps($token, $query);
+            $scope = $user->reference_scope ?: 'team_then_public';
+            $candidates = $this->queryCandidatesByScope($token, $baseQuery, $scope);
             if ($candidates === []) {
                 return null;
             }
@@ -277,6 +268,38 @@ class Garage61ImporterService
 
             return null;
         }
+    }
+
+    /**
+     * Query Garage 61 respecting the user's configured driver scope:
+     * - team_only: strictly user + joined G61 teams
+     * - team_then_public: try team + user first; fall back to public community if empty
+     * - public_all: query all visible laps (public + team) directly
+     *
+     * @param  array<string, mixed>  $baseQuery
+     * @return array<int, array<string, mixed>>
+     */
+    private function queryCandidatesByScope(string $token, array $baseQuery, string $scope): array
+    {
+        if ($scope === 'public_all') {
+            return $this->client->searchLaps($token, $baseQuery);
+        }
+
+        $teams = $this->client->listTeams($token);
+        $teamSlugs = array_filter(array_map(static fn (array $t) => $t['slug'] ?? null, $teams));
+
+        $teamQuery = array_merge($baseQuery, ['drivers' => 'me']);
+        if ($teamSlugs !== []) {
+            $teamQuery['teams'] = implode(',', $teamSlugs);
+        }
+
+        $teamResults = $this->client->searchLaps($token, $teamQuery);
+        if ($scope === 'team_only' || $teamResults !== []) {
+            return $teamResults;
+        }
+
+        // Cascade fallback to all visible public community laps
+        return $this->client->searchLaps($token, $baseQuery);
     }
 
     /**

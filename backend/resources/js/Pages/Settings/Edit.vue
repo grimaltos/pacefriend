@@ -22,6 +22,7 @@ const g61Form = useForm({
     garage61_token: '',
     clear_token: false,
     autopilot_enabled: props.profile.autopilot_enabled ?? true,
+    reference_scope: props.profile.reference_scope || 'team_then_public',
     autopilot_mode: props.profile.autopilot_mode || 'progressive',
     autopilot_delta_ms: props.profile.autopilot_delta_ms || 1000,
 });
@@ -157,13 +158,21 @@ function revoke(id) {
                         <span>Activar <strong>Autopilot en Pista</strong> (descarga referencia térmica automáticamente)</span>
                     </label>
 
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">¿De qué pilotos quieres tomar referencias? (Ámbito)</label>
+                        <select v-model="g61Form.reference_scope" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+                            <option value="team_then_public">Mi Equipo primero; Comunidad Pública si falta a esa temp. (Cascada · Recomendado)</option>
+                            <option value="team_only">Solo miembros de mi Equipo G61 y mis vueltas</option>
+                            <option value="public_all">Toda la Comunidad Pública + Equipo</option>
+                        </select>
+                    </div>
+
                     <div class="grid sm:grid-cols-2 gap-3">
                         <div>
-                            <label class="block text-xs font-medium text-zinc-400 mb-1">Estrategia de Objetivo</label>
+                            <label class="block text-xs font-medium text-zinc-400 mb-1">Estrategia de Ritmo Objetivo</label>
                             <select v-model="g61Form.autopilot_mode" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
                                 <option value="progressive">Escalón Progresivo (Recomendado)</option>
-                                <option value="team">Solo Compañeros de mi Equipo G61</option>
-                                <option value="alien">Récord Top Alien Disponible</option>
+                                <option value="fastest">Vuelta más rápida disponible (Top)</option>
                             </select>
                         </div>
                         <div v-if="g61Form.autopilot_mode === 'progressive'">

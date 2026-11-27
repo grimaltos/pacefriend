@@ -28,6 +28,8 @@ Route::middleware('auth')->group(function () {
     Route::get('/references/garage61/search', [ReferenceLapController::class, 'searchGarage61'])->name('references.g61.search');
     Route::post('/references/garage61/import-lap', [ReferenceLapController::class, 'importGarage61Lap'])->name('references.g61.lap');
     Route::post('/laps/{lap}/promote', [ReferenceLapController::class, 'promoteFromLap'])->name('laps.promote');
+    Route::post('/references/{referenceLap}/pin', [ReferenceLapController::class, 'togglePin'])->name('references.pin');
+    Route::delete('/references/prune', [ReferenceLapController::class, 'pruneStale'])->name('references.prune');
     Route::delete('/references/{referenceLap}', [ReferenceLapController::class, 'destroy'])->name('references.destroy');
 
     Route::get('/sessions', [DrivingSessionController::class, 'index'])->name('sessions.index');

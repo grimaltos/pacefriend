@@ -51,7 +51,8 @@ class SettingsController extends Controller
                 'garage61_callback_url' => $g61OAuth->redirectUri(),
                 'garage61_status' => $g61Status,
                 'autopilot_enabled' => (bool) $user->autopilot_enabled,
-                'autopilot_mode' => $user->autopilot_mode ?: 'progressive',
+                'reference_scope' => $user->reference_scope ?: 'team_then_public',
+                'autopilot_mode' => in_array($user->autopilot_mode, ['fastest', 'alien'], true) ? 'fastest' : 'progressive',
                 'autopilot_delta_ms' => $user->autopilot_delta_ms ?: 1000,
             ],
             'tokens' => $user->tokens()
@@ -109,14 +110,19 @@ class SettingsController extends Controller
             'garage61_token' => ['nullable', 'string', 'max:1024'],
             'clear_token' => ['nullable', 'boolean'],
             'autopilot_enabled' => ['required', 'boolean'],
-            'autopilot_mode' => ['required', 'in:progressive,team,alien'],
+            'reference_scope' => ['nullable', 'in:team_only,team_then_public,public_all'],
+            'autopilot_mode' => ['required', 'in:progressive,fastest,team,alien'],
             'autopilot_delta_ms' => ['required', 'integer', 'min:400', 'max:3000'],
         ]);
 
         $user = $request->user();
+        $scope = $validated['reference_scope'] ?? ($validated['autopilot_mode'] === 'team' ? 'team_only' : ($user->reference_scope ?: 'team_then_public'));
+        $mode = in_array($validated['autopilot_mode'], ['fastest', 'alien', 'team'], true) ? 'fastest' : 'progressive';
+
         $updates = [
             'autopilot_enabled' => (bool) $validated['autopilot_enabled'],
-            'autopilot_mode' => $validated['autopilot_mode'],
+            'reference_scope' => $scope,
+            'autopilot_mode' => $mode,
             'autopilot_delta_ms' => (int) $validated['autopilot_delta_ms'],
         ];
 

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Lap;
 use App\Models\ReferenceLap;
 use App\Models\Track;
+use App\Services\Garage61\Garage61CsvParserService;
 use App\Services\Garage61\Garage61ImporterService;
 use App\Services\Telemetry\IbtFileParserService;
 use App\Services\Telemetry\TelemetryNormalizerService;
@@ -21,6 +22,7 @@ class ReferenceLapController extends Controller
 {
     public function __construct(
         private readonly IbtFileParserService $ibtParser,
+        private readonly Garage61CsvParserService $g61CsvParser,
         private readonly TelemetryNormalizerService $normalizer,
         private readonly Garage61ImporterService $g61Importer,
     ) {}
@@ -64,6 +66,9 @@ class ReferenceLapController extends Controller
     {
         $validated = $request->validate([
             'telemetry_file' => ['required', 'file', 'max:51200'],
+            'track_id' => ['nullable', 'integer', 'exists:tracks,id'],
+            'car_name' => ['nullable', 'string', 'max:160'],
+            'lap_time_override' => ['nullable', 'string', 'max:24'],
             'label' => ['nullable', 'string', 'max:180'],
             'track_temp_override' => ['nullable', 'numeric', 'min:-10', 'max:75'],
             'air_temp_override' => ['nullable', 'numeric', 'min:-20', 'max:60'],
@@ -71,21 +76,59 @@ class ReferenceLapController extends Controller
         ]);
 
         $file = $request->file('telemetry_file');
+        $rawContent = (string) file_get_contents($file->getRealPath());
+        $originalName = $file->getClientOriginalName();
+        $isCsv = strtolower($file->getClientOriginalExtension()) === 'csv' || $this->looksLikeGarage61Csv($rawContent);
 
-        try {
-            $parsed = $this->ibtParser->parseContent(
-                (string) file_get_contents($file->getRealPath()),
-                $file->getClientOriginalName()
-            );
-        } catch (InvalidArgumentException $e) {
-            return back()->withErrors(['telemetry_file' => $e->getMessage()]);
+        if ($isCsv) {
+            if (empty($validated['track_id']) || empty(trim((string) ($validated['car_name'] ?? '')))) {
+                return back()->withErrors([
+                    'telemetry_file' => 'Para subir un CSV de Garage 61 selecciona el Circuito y escribe el nombre del Coche.',
+                ]);
+            }
+
+            $track = Track::query()->findOrFail((int) $validated['track_id']);
+            try {
+                $csvParsed = $this->g61CsvParser->parseUploadedFile($rawContent, $track->length_km);
+            } catch (InvalidArgumentException $e) {
+                return back()->withErrors(['telemetry_file' => $e->getMessage()]);
+            }
+
+            $overrideMs = $this->parseLapTimeStringToMs($validated['lap_time_override'] ?? null);
+            $parsed = [
+                'track_slug' => $track->slug,
+                'track_name' => $track->name,
+                'track_length_km' => $track->length_km,
+                'car_name' => trim((string) $validated['car_name']),
+                'lap_time_ms' => $overrideMs ?? $csvParsed['inferred_lap_time_ms'],
+                'track_temp_c' => $csvParsed['track_temp_c'],
+                'air_temp_c' => $csvParsed['air_temp_c'],
+                'is_wet' => false,
+                'source' => 'g61_csv_upload',
+                'samples' => $csvParsed['samples'],
+            ];
+        } else {
+            try {
+                $parsed = $this->ibtParser->parseContent($rawContent, $originalName);
+            } catch (InvalidArgumentException $e) {
+                return back()->withErrors(['telemetry_file' => $e->getMessage()]);
+            }
+
+            $track = ! empty($validated['track_id'])
+                ? Track::query()->findOrFail((int) $validated['track_id'])
+                : Track::resolveOrCreateCurated(
+                    $parsed['track_slug'],
+                    $parsed['track_name'],
+                    $parsed['track_length_km']
+                );
+
+            if (! empty(trim((string) ($validated['car_name'] ?? '')))) {
+                $parsed['car_name'] = trim((string) $validated['car_name']);
+            }
+            if ($overrideMs = $this->parseLapTimeStringToMs($validated['lap_time_override'] ?? null)) {
+                $parsed['lap_time_ms'] = $overrideMs;
+            }
         }
-
-        $track = Track::resolveOrCreateCurated(
-            $parsed['track_slug'],
-            $parsed['track_name'],
-            $parsed['track_length_km']
-        );
 
         $trackTemp = isset($validated['track_temp_override']) && $validated['track_temp_override'] !== null
             ? (float) $validated['track_temp_override']
@@ -104,7 +147,7 @@ class ReferenceLapController extends Controller
             'user_id' => $request->user()->id,
             'track_id' => $track->id,
             'car_name' => $parsed['car_name'],
-            'label' => $validated['label'] ?: "{$file->getClientOriginalName()} ({$trackTemp} °C)",
+            'label' => $validated['label'] ?: "{$originalName} ({$trackTemp} °C)",
             'lap_time_ms' => $parsed['lap_time_ms'],
             'track_temp_c' => $trackTemp,
             'air_temp_c' => $airTemp,
@@ -115,6 +158,32 @@ class ReferenceLapController extends Controller
         ]);
 
         return back()->with('success', "Vuelta de referencia cargada para {$track->name} ({$trackTemp} °C asfalto).");
+    }
+
+    private function looksLikeGarage61Csv(string $raw): bool
+    {
+        $firstLine = strtolower((string) strtok(ltrim($raw, "\xEF\xBB\xBF \t\r\n"), "\r\n"));
+        return str_contains($firstLine, ',') && str_contains($firstLine, 'lapdistpct') && str_contains($firstLine, 'speed');
+    }
+
+    private function parseLapTimeStringToMs(?string $input): ?int
+    {
+        $s = trim((string) $input);
+        if ($s === '') {
+            return null;
+        }
+        // Format M:SS.mmm (e.g. 2:17.450)
+        if (preg_match('/^(\d+):(\d{1,2})(?:[.,](\d{1,3}))?$/', $s, $m)) {
+            $minutes = (int) $m[1];
+            $seconds = (int) $m[2];
+            $millis = isset($m[3]) ? (int) str_pad($m[3], 3, '0') : 0;
+            return ($minutes * 60000) + ($seconds * 1000) + $millis;
+        }
+        // Seconds float (e.g. 137.450)
+        if (is_numeric($s) && (float) $s > 5.0) {
+            return (int) round(((float) $s) * 1000.0);
+        }
+        return null;
     }
 
     public function importGarage61Url(Request $request): RedirectResponse

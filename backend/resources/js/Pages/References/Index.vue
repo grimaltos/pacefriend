@@ -12,11 +12,16 @@ const props = defineProps({
 
 const uploadForm = useForm({
     telemetry_file: null,
+    track_id: '',
+    car_name: '',
+    lap_time_override: '',
     label: '',
     track_temp_override: '',
     air_temp_override: '',
     is_wet: false,
 });
+
+const isCsvSelected = ref(false);
 
 const g61UrlForm = useForm({
     g61_input: '',
@@ -31,13 +36,21 @@ const g61Results = ref([]);
 const g61SearchError = ref('');
 
 function onFileChange(e) {
-    uploadForm.telemetry_file = e.target.files[0] || null;
+    const f = e.target.files[0] || null;
+    uploadForm.telemetry_file = f;
+    isCsvSelected.value = !!f && f.name.toLowerCase().endsWith('.csv');
+    if (isCsvSelected.value && !uploadForm.track_id && props.tracks?.length) {
+        uploadForm.track_id = props.tracks[0].id;
+    }
 }
 
 function submitUpload() {
     uploadForm.post('/references', {
         forceFormData: true,
-        onSuccess: () => uploadForm.reset(),
+        onSuccess: () => {
+            uploadForm.reset();
+            isCsvSelected.value = false;
+        },
     });
 }
 
@@ -177,14 +190,35 @@ function removeRef(id) {
 
         <div class="grid lg:grid-cols-3 gap-6">
             <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6 h-fit">
-                <h2 class="font-semibold text-white mb-1">Subir Archivo Local (.ibt / .json)</h2>
-                <p class="text-xs text-zinc-400 mb-4">Extraemos coche, circuito, mejor vuelta limpia y temperatura directamente del archivo.</p>
+                <h2 class="font-semibold text-white mb-1">Subir Archivo (.ibt, .csv G61 o .json)</h2>
+                <p class="text-xs text-zinc-400 mb-4">Sube el CSV exportado desde la web de Garage 61 o un archivo <code class="text-zinc-200">.ibt</code> nativo de iRacing.</p>
 
                 <form @submit.prevent="submitUpload" class="space-y-4">
                     <div>
-                        <label class="block text-xs font-medium text-zinc-300 mb-1">Archivo de telemetría (.ibt o .json)</label>
-                        <input type="file" accept=".ibt,.json" required @change="onFileChange" class="w-full text-xs text-zinc-300 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-zinc-800 file:text-zinc-200 hover:file:bg-zinc-700" />
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Archivo (.ibt, .csv o .json)</label>
+                        <input type="file" accept=".ibt,.csv,.json" required @change="onFileChange" class="w-full text-xs text-zinc-300 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-zinc-800 file:text-zinc-200 hover:file:bg-zinc-700" />
                         <p v-if="uploadForm.errors.telemetry_file" class="text-xs text-rose-400 mt-1">{{ uploadForm.errors.telemetry_file }}</p>
+                    </div>
+
+                    <div class="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5">
+                        <div class="text-[11px] font-semibold" :class="isCsvSelected ? 'text-emerald-400' : 'text-zinc-400'">
+                            {{ isCsvSelected ? 'Datos de la vuelta CSV de Garage 61 (obligatorios para CSV):' : 'Circuito / Coche (opcional en .ibt, se autodetectan):' }}
+                        </div>
+                        <div>
+                            <label class="block text-xs text-zinc-400 mb-1">Circuito</label>
+                            <select v-model="uploadForm.track_id" :required="isCsvSelected" class="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm text-white">
+                                <option value="">Autodetectar del .ibt</option>
+                                <option v-for="t in tracks" :key="t.id" :value="t.id">{{ t.name }}</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-zinc-400 mb-1">Nombre exacto del Coche en iRacing</label>
+                            <input v-model="uploadForm.car_name" :required="isCsvSelected" type="text" placeholder="Ej. Porsche 911 GT3 R (992)" class="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" />
+                        </div>
+                        <div>
+                            <label class="block text-xs text-zinc-400 mb-1">Tiempo oficial (opc., ej. 2:17.450)</label>
+                            <input v-model="uploadForm.lap_time_override" type="text" placeholder="Se calcula del CSV si lo dejas vacío" class="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-emerald-500" />
+                        </div>
                     </div>
 
                     <div>
@@ -227,8 +261,8 @@ function removeRef(id) {
                                 <span v-if="ref.source === 'garage61_autopilot'" class="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                                     G61 Autopilot
                                 </span>
-                                <span v-else-if="ref.source === 'garage61_manual'" class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                    G61 Importada
+                                <span v-else-if="ref.source === 'garage61_manual' || ref.source === 'g61_csv_upload'" class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    {{ ref.source === 'g61_csv_upload' ? 'G61 CSV' : 'G61 Importada' }}
                                 </span>
                                 <span v-else :class="ref.is_owned ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'" class="text-[11px] px-2 py-0.5 rounded-full border">
                                     {{ ref.is_owned ? 'Propia' : 'Base' }}

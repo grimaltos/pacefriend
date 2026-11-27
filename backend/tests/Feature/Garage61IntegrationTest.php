@@ -226,6 +226,32 @@ class Garage61IntegrationTest extends TestCase
         $this->artisan('tracks:sync')->assertSuccessful();
     }
 
+    public function test_user_can_upload_garage61_exported_csv_file_directly(): void
+    {
+        $user = User::factory()->create();
+        $spa = \App\Models\Track::query()->where('slug', 'spa-up')->firstOrFail();
+
+        $csvFile = \Illuminate\Http\UploadedFile::fake()->createWithContent(
+            'g61_spa_export.csv',
+            $this->buildSyntheticG61Csv()
+        );
+
+        $this->actingAs($user)->post('/references', [
+            'telemetry_file' => $csvFile,
+            'track_id' => $spa->id,
+            'car_name' => 'Porsche 911 GT3 R (992)',
+            'lap_time_override' => '2:17.450',
+            'track_temp_override' => 30.5,
+            'label' => 'CSV Exportado G61',
+        ])->assertSessionHasNoErrors();
+
+        $ref = ReferenceLap::query()->where('user_id', $user->id)->firstOrFail();
+        $this->assertSame('g61_csv_upload', $ref->source);
+        $this->assertSame(137450, $ref->lap_time_ms);
+        $this->assertEqualsWithDelta(30.5, $ref->track_temp_c, 0.1);
+        $this->assertNotEmpty($ref->corner_baselines);
+    }
+
     private function buildSyntheticG61Csv(): string
     {
         $rows = ['LapDistPct,Speed,Throttle,Brake,Gear,LapCurrentLapTime'];

@@ -32,6 +32,8 @@ class Garage61CsvParserService
         $brakeIdx = $colMap['brake'] ?? null;
         $gearIdx = $colMap['gear'] ?? null;
         $timeIdx = $colMap['lapcurrentlaptime'] ?? $colMap['sessiontime'] ?? $colMap['time'] ?? null;
+        $trackTempIdx = $colMap['tracktempcrew'] ?? $colMap['tracktemp'] ?? $colMap['track_temp'] ?? null;
+        $airTempIdx = $colMap['airtemp'] ?? $colMap['air_temp'] ?? null;
 
         if ($pctIdx === null || $speedIdx === null || $throttleIdx === null || $brakeIdx === null) {
             throw new InvalidArgumentException('El CSV de Garage 61 no incluye las columnas base requeridas (LapDistPct, Speed, Throttle, Brake).');
@@ -41,6 +43,8 @@ class Garage61CsvParserService
         $maxPctSeen = 0.0;
         $maxThrottleSeen = 0.0;
         $maxBrakeSeen = 0.0;
+        $detectedTrackTemp = null;
+        $detectedAirTemp = null;
 
         foreach ($lines as $line) {
             if (trim($line) === '') {
@@ -49,6 +53,13 @@ class Garage61CsvParserService
             $cols = str_getcsv($line);
             if (! isset($cols[$pctIdx], $cols[$speedIdx], $cols[$throttleIdx], $cols[$brakeIdx])) {
                 continue;
+            }
+
+            if ($detectedTrackTemp === null && $trackTempIdx !== null && isset($cols[$trackTempIdx]) && is_numeric($cols[$trackTempIdx])) {
+                $detectedTrackTemp = round((float) $cols[$trackTempIdx], 1);
+            }
+            if ($detectedAirTemp === null && $airTempIdx !== null && isset($cols[$airTempIdx]) && is_numeric($cols[$airTempIdx])) {
+                $detectedAirTemp = round((float) $cols[$airTempIdx], 1);
             }
 
             $pct = (float) $cols[$pctIdx];
@@ -121,5 +132,51 @@ class Garage61CsvParserService
         }
 
         return $samples;
+    }
+
+    /**
+     * Parse a manually uploaded Garage 61 CSV file and infer lap duration & temperatures if present.
+     *
+     * @return array{
+     *   samples: array<int, array<string, float|int>>,
+     *   inferred_lap_time_ms: int,
+     *   track_temp_c: float,
+     *   air_temp_c: float
+     * }
+     */
+    public function parseUploadedFile(string $csvContent, float $trackLengthKm = 5.0): array
+    {
+        // Strip UTF-8 BOM if present
+        $clean = preg_replace('/^\xEF\xBB\xBF/', '', $csvContent) ?? $csvContent;
+        $samples = $this->parseCsv($clean, 95000, $trackLengthKm);
+        $last = end($samples);
+        $inferredMs = max(10000, (int) ($last['t_ms'] ?? 95000));
+
+        // Extract optional TrackTemp / AirTemp from first data row if exported
+        $lines = preg_split('/\r\n|\r|\n/', trim($clean)) ?: [];
+        $trackTemp = 26.0;
+        $airTemp = 20.0;
+        if (count($lines) >= 2) {
+            $headers = array_map(static fn ($h) => strtolower(trim((string) $h, " \"'")), str_getcsv($lines[0]));
+            $firstRow = str_getcsv($lines[1]);
+            $tIdx = array_search('tracktempcrew', $headers, true);
+            if ($tIdx === false) {
+                $tIdx = array_search('tracktemp', $headers, true);
+            }
+            if ($tIdx !== false && isset($firstRow[$tIdx]) && is_numeric($firstRow[$tIdx])) {
+                $trackTemp = round((float) $firstRow[$tIdx], 1);
+            }
+            $aIdx = array_search('airtemp', $headers, true);
+            if ($aIdx !== false && isset($firstRow[$aIdx]) && is_numeric($firstRow[$aIdx])) {
+                $airTemp = round((float) $firstRow[$aIdx], 1);
+            }
+        }
+
+        return [
+            'samples' => $samples,
+            'inferred_lap_time_ms' => $inferredMs,
+            'track_temp_c' => $trackTemp,
+            'air_temp_c' => $airTemp,
+        ];
     }
 }

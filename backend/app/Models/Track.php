@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['slug', 'garage61_track_id', 'name', 'length_km', 'corners'])]
+#[Fillable(['slug', 'garage61_track_id', 'name', 'length_km', 'corners', 'sectors'])]
 class Track extends Model
 {
     protected function casts(): array
@@ -15,7 +15,66 @@ class Track extends Model
             'garage61_track_id' => 'integer',
             'length_km' => 'float',
             'corners' => 'array',
+            'sectors' => 'array',
         ];
+    }
+
+    /**
+     * Return official iRacing sector boundaries [{sector, start_pct, end_pct}, ...],
+     * falling back to 3 balanced partials if not yet populated from SessionInfo YAML.
+     *
+     * @return array<int, array{sector: int, start_pct: float, end_pct: float}>
+     */
+    public function effectiveSectors(): array
+    {
+        if (is_array($this->sectors) && count($this->sectors) >= 2) {
+            return array_values($this->sectors);
+        }
+
+        return [
+            ['sector' => 1, 'start_pct' => 0.0000, 'end_pct' => 0.3333],
+            ['sector' => 2, 'start_pct' => 0.3333, 'end_pct' => 0.6667],
+            ['sector' => 3, 'start_pct' => 0.6667, 'end_pct' => 1.0000],
+        ];
+    }
+
+    /**
+     * Update track sector boundaries from an ordered array of iRacing SectorStartPct floats.
+     *
+     * @param  array<int, float|int>  $startPcts
+     */
+    public function syncSectorSplits(array $startPcts): void
+    {
+        $clean = [];
+        foreach ($startPcts as $p) {
+            $val = round(max(0.0, min(0.999, (float) $p)), 4);
+            $clean[] = $val;
+        }
+        $clean = array_values(array_unique($clean));
+        sort($clean);
+
+        if (count($clean) < 2) {
+            return;
+        }
+        if ($clean[0] > 0.02) {
+            array_unshift($clean, 0.0);
+        } else {
+            $clean[0] = 0.0;
+        }
+
+        $sectors = [];
+        $n = count($clean);
+        for ($i = 0; $i < $n; $i++) {
+            $sectors[] = [
+                'sector' => $i + 1,
+                'start_pct' => $clean[$i],
+                'end_pct' => ($i + 1 < $n) ? $clean[$i + 1] : 1.0000,
+            ];
+        }
+
+        if ($this->sectors !== $sectors) {
+            $this->update(['sectors' => $sectors]);
+        }
     }
 
     public static function resolveOrCreateCurated(string $slug, string $name = '', float $lengthKm = 5.0): self

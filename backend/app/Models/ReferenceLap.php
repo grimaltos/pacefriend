@@ -24,6 +24,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'driver_name',
     'normalized_points',
     'corner_baselines',
+    'sector_splits_ms',
 ])]
 class ReferenceLap extends Model
 {
@@ -39,6 +40,7 @@ class ReferenceLap extends Model
             'is_pinned' => 'boolean',
             'normalized_points' => 'array',
             'corner_baselines' => 'array',
+            'sector_splits_ms' => 'array',
         ];
     }
 

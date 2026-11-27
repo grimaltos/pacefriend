@@ -46,35 +46,60 @@ type RawFrame struct {
 // SessionMetadata identifies the circuit, car, and iRacing session extracted
 // dynamically from the SessionInfo YAML block in shared memory.
 type SessionMetadata struct {
-	TrackSlug     string  `json:"track_slug"`
-	TrackName     string  `json:"track_name"`
-	TrackLengthKm float64 `json:"track_length_km"`
-	CarName       string  `json:"car_name"`
-	SessionID     int     `json:"session_id"`
-	SubSessionID  int     `json:"sub_session_id"`
+	TrackSlug     string    `json:"track_slug"`
+	TrackName     string    `json:"track_name"`
+	TrackLengthKm float64   `json:"track_length_km"`
+	CarName       string    `json:"car_name"`
+	SessionID     int       `json:"session_id"`
+	SubSessionID  int       `json:"sub_session_id"`
+	SectorSplits  []float32 `json:"sector_splits,omitempty"`
 }
 
 // CompletedLap is the payload dispatched asynchronously via HTTP POST
 // whenever the driver crosses the start/finish line.
 type CompletedLap struct {
-	UserID        string  `json:"user_id"`
-	TrackSlug     string  `json:"track_slug"`
-	TrackName     string  `json:"track_name"`
-	TrackLengthKm float64 `json:"track_length_km"`
-	CarName       string  `json:"car_name"`
-	SessionID     int     `json:"session_id"`
-	SubSessionID  int     `json:"sub_session_id"`
-	LapNumber     int32   `json:"lap_number"`
-	LapTimeMs     uint32  `json:"lap_time_ms"`
-	IsClean       bool     `json:"is_clean"`
-	IncidentDelta int32    `json:"incident_delta"`
-	TrackTempC    float32  `json:"track_temp_c"`
-	AirTempC      float32  `json:"air_temp_c"`
-	IsWet         bool     `json:"is_wet"`
-	FuelLevelL    float32  `json:"fuel_level_l,omitempty"`
-	FuelUsedL     float32  `json:"fuel_used_l,omitempty"`
-	SampleRateHz  int      `json:"sample_rate_hz"`
-	Samples       []Sample `json:"samples"`
+	UserID        string    `json:"user_id"`
+	TrackSlug     string    `json:"track_slug"`
+	TrackName     string    `json:"track_name"`
+	TrackLengthKm float64   `json:"track_length_km"`
+	CarName       string    `json:"car_name"`
+	SessionID     int       `json:"session_id"`
+	SubSessionID  int       `json:"sub_session_id"`
+	LapNumber     int32     `json:"lap_number"`
+	LapTimeMs     uint32    `json:"lap_time_ms"`
+	IsClean       bool      `json:"is_clean"`
+	IncidentDelta int32     `json:"incident_delta"`
+	TrackTempC    float32   `json:"track_temp_c"`
+	AirTempC      float32   `json:"air_temp_c"`
+	IsWet         bool      `json:"is_wet"`
+	FuelLevelL    float32   `json:"fuel_level_l,omitempty"`
+	FuelUsedL     float32   `json:"fuel_used_l,omitempty"`
+	SectorSplits  []float32 `json:"sector_splits,omitempty"`
+	SampleRateHz  int       `json:"sample_rate_hz"`
+	Samples       []Sample  `json:"samples"`
+}
+
+// CompletedSector is dispatched asynchronously as soon as the car crosses an official
+// intermediate sector split, enabling mid-lap coaching and optimal-lap tracking.
+type CompletedSector struct {
+	UserID         string    `json:"user_id"`
+	TrackSlug      string    `json:"track_slug"`
+	TrackName      string    `json:"track_name"`
+	TrackLengthKm  float64   `json:"track_length_km"`
+	CarName        string    `json:"car_name"`
+	SessionID      int       `json:"session_id"`
+	SubSessionID   int       `json:"sub_session_id"`
+	LapNumber      int32     `json:"lap_number"`
+	SectorNumber   int       `json:"sector_number"`
+	SectorStartPct float32   `json:"sector_start_pct"`
+	SectorEndPct   float32   `json:"sector_end_pct"`
+	SectorTimeMs   uint32    `json:"sector_time_ms"`
+	IsClean        bool      `json:"is_clean"`
+	TrackTempC     float32   `json:"track_temp_c"`
+	AirTempC       float32   `json:"air_temp_c"`
+	IsWet          bool      `json:"is_wet"`
+	SectorSplits   []float32 `json:"sector_splits,omitempty"`
+	Samples        []Sample  `json:"samples"`
 }
 
 // Source abstracts telemetry acquisition so the exact same 20 Hz engine runs

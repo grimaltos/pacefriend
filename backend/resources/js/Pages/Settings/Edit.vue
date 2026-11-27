@@ -27,6 +27,7 @@ const radioForm = useForm({
     radio_beep: radioDefaults.radio_beep ?? true,
     pit_wall_fx: radioDefaults.pit_wall_fx ?? true,
     finish_callout_mode: radioDefaults.finish_callout_mode || 'full',
+    sector_callout_mode: radioDefaults.sector_callout_mode || 'improvements',
     min_clean_laps: radioDefaults.min_clean_laps || 3,
     fuel_alerts: radioDefaults.fuel_alerts ?? true,
     tyre_temp_alerts: radioDefaults.tyre_temp_alerts ?? true,
@@ -166,7 +167,7 @@ function revoke(id) {
             <p v-if="previewError" class="mb-4 text-xs text-rose-400">{{ previewError }}</p>
 
             <form @submit.prevent="saveRadio" class="space-y-6">
-                <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
+                <div class="grid md:grid-cols-2 lg:grid-cols-5 gap-4">
                     <div>
                         <label class="block text-xs font-medium text-zinc-300 mb-1">Voz del Ingeniero (Edge Neural)</label>
                         <select v-model="radioForm.voice_id" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
@@ -189,25 +190,34 @@ function revoke(id) {
                             step="5"
                             class="w-full accent-emerald-500 cursor-pointer mt-2"
                         />
-                        <p class="text-[11px] text-zinc-500 mt-1">Se aplica en vivo al cliente Windows sin tocar el volumen del motor de iRacing.</p>
+                        <p class="text-[11px] text-zinc-500 mt-1">Independiente del motor de iRacing.</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Aviso en parciales (S1, S2...)</label>
+                        <select v-model="radioForm.sector_callout_mode" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+                            <option value="improvements">Solo mejoras y récords (Recomendado)</option>
+                            <option value="full">Cantar cada parcial</option>
+                            <option value="off">Silencio entre parciales</option>
+                        </select>
                     </div>
 
                     <div>
                         <label class="block text-xs font-medium text-zinc-300 mb-1">Aviso al cruzar por meta</label>
                         <select v-model="radioForm.finish_callout_mode" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
-                            <option value="full">Completo (tiempos + refuerzo positivo)</option>
-                            <option value="improvements">Solo mejoras y refuerzo positivo</option>
-                            <option value="off">Desactivado (silencio en recta de meta)</option>
+                            <option value="full">Completo (tiempos + refuerzo)</option>
+                            <option value="improvements">Solo mejoras y refuerzo</option>
+                            <option value="off">Desactivado</option>
                         </select>
                     </div>
 
                     <div>
-                        <label class="block text-xs font-medium text-zinc-300 mb-1">Vueltas limpias antes de corregir curvas</label>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Pasadas limpias por parcial</label>
                         <select v-model.number="radioForm.min_clean_laps" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
-                            <option :value="2">2 vueltas limpias (Feedback rápido)</option>
-                            <option :value="3">3 vueltas limpias (Equilibrado · Recomendado)</option>
-                            <option :value="4">4 vueltas limpias</option>
-                            <option :value="5">5 vueltas limpias (Solo hábitos muy marcados)</option>
+                            <option :value="2">2 pasadas limpias (Rápido)</option>
+                            <option :value="3">3 pasadas limpias (Recomendado)</option>
+                            <option :value="4">4 pasadas limpias</option>
+                            <option :value="5">5 pasadas limpias</option>
                         </select>
                     </div>
                 </div>

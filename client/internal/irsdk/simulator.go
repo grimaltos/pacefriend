@@ -40,6 +40,14 @@ WeekendInfo:
  TrackDisplayName: Circuit de Spa-Francorchamps
  SessionID: 104521
  SubSessionID: 68912044
+SplitTimeInfo:
+ Sectors:
+ - SectorNum: 0
+   SectorStartPct: 0.000000
+ - SectorNum: 1
+   SectorStartPct: 0.341000
+ - SectorNum: 2
+   SectorStartPct: 0.685000
 DriverInfo:
  DriverCarIdx: 4
  Drivers:

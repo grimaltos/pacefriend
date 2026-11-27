@@ -34,17 +34,18 @@ type LapResponse struct {
 
 // BriefingRequest is sent once upon entering track or when weather conditions shift.
 type BriefingRequest struct {
-	TrackSlug     string  `json:"track_slug"`
-	TrackName     string  `json:"track_name,omitempty"`
-	TrackLengthKm float64 `json:"track_length_km,omitempty"`
-	CarName       string  `json:"car_name"`
-	SessionID     int     `json:"session_id,omitempty"`
-	SubSessionID  int     `json:"sub_session_id,omitempty"`
-	TrackTempC    float32 `json:"track_temp_c"`
-	AirTempC      float32 `json:"air_temp_c"`
-	IsWet         bool    `json:"is_wet"`
-	FuelLevelL    float32 `json:"fuel_level_l,omitempty"`
-	Reason        string  `json:"reason"`
+	TrackSlug     string    `json:"track_slug"`
+	TrackName     string    `json:"track_name,omitempty"`
+	TrackLengthKm float64   `json:"track_length_km,omitempty"`
+	CarName       string    `json:"car_name"`
+	SessionID     int       `json:"session_id,omitempty"`
+	SubSessionID  int       `json:"sub_session_id,omitempty"`
+	TrackTempC    float32   `json:"track_temp_c"`
+	AirTempC      float32   `json:"air_temp_c"`
+	IsWet         bool      `json:"is_wet"`
+	FuelLevelL    float32   `json:"fuel_level_l,omitempty"`
+	SectorSplits  []float32 `json:"sector_splits,omitempty"`
+	Reason        string    `json:"reason"`
 }
 
 // PitStopRequest carries unlocked tyre pyrometer readings upon stopping in pits or garage.
@@ -72,8 +73,10 @@ type Config struct {
 }
 
 type uploadJob struct {
-	lap   telemetry.CompletedLap
-	batch *buffer.SampleBatch
+	isSector bool
+	lap      telemetry.CompletedLap
+	sector   telemetry.CompletedSector
+	batch    *buffer.SampleBatch
 }
 
 type asyncEvent struct {
@@ -289,6 +292,23 @@ func (u *Uploader) Enqueue(lap telemetry.CompletedLap, batch *buffer.SampleBatch
 	}
 }
 
+// EnqueueSector schedules a completed intermediate partial/sector for background HTTP POST
+// without blocking or allocating on the 20 Hz telemetry thread.
+func (u *Uploader) EnqueueSector(sector telemetry.CompletedSector, batch *buffer.SampleBatch) bool {
+	if batch != nil {
+		sector.Samples = batch.Samples
+	}
+	select {
+	case u.jobs <- uploadJob{isSector: true, sector: sector, batch: batch}:
+		return true
+	default:
+		if u.pool != nil && batch != nil {
+			u.pool.Release(batch)
+		}
+		return false
+	}
+}
+
 func (u *Uploader) processAsyncEvent(ctx context.Context, ev asyncEvent) {
 	if u.baseURL == "" {
 		return
@@ -357,8 +377,13 @@ func (u *Uploader) processJob(ctx context.Context, job uploadJob) {
 		defer u.pool.Release(job.batch)
 	}
 
-	if u.endpoint == "" {
-		if u.logger != nil {
+	targetURL := u.endpoint
+	if job.isSector && u.baseURL != "" {
+		targetURL = u.baseURL + "/api/v1/telemetry/sector"
+	}
+
+	if targetURL == "" {
+		if u.logger != nil && !job.isSector {
 			u.logger.Info("lap completed (dry-run, no API URL configured)",
 				slog.Int("lap", int(job.lap.LapNumber)),
 				slog.Uint64("lap_time_ms", uint64(job.lap.LapTimeMs)),
@@ -374,14 +399,20 @@ func (u *Uploader) processJob(ctx context.Context, job uploadJob) {
 	defer u.bufPool.Put(buf)
 
 	enc := json.NewEncoder(buf)
-	if err := enc.Encode(&job.lap); err != nil {
+	var encodeErr error
+	if job.isSector {
+		encodeErr = enc.Encode(&job.sector)
+	} else {
+		encodeErr = enc.Encode(&job.lap)
+	}
+	if encodeErr != nil {
 		if u.logger != nil {
-			u.logger.Error("failed to serialize lap JSON", slog.Any("err", err))
+			u.logger.Error("failed to serialize telemetry JSON", slog.Any("err", encodeErr))
 		}
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.endpoint, bytes.NewReader(buf.Bytes()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		if u.logger != nil {
 			u.logger.Error("failed to build HTTP request", slog.Any("err", err))

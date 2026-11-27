@@ -104,6 +104,34 @@ func (r *RingBuffer) Reset() {
 	r.count = 0
 }
 
+// SnapshotFrom copies samples from logical index fromIdx (0 = oldest sample of the
+// active lap) up to the newest sample into a pooled SampleBatch WITHOUT resetting
+// the buffer. Used to upload intermediate sectors mid-lap. Returns nil if the range
+// is empty or the buffer already overwrote the requested start.
+func (r *RingBuffer) SnapshotFrom(pool *SnapshotPool, fromIdx int) *SampleBatch {
+	if fromIdx < 0 || fromIdx >= r.count || r.count >= len(r.buf) {
+		return nil
+	}
+	n := r.count - fromIdx
+	batch := pool.Acquire(n)
+	start := r.head - r.count
+	if start < 0 {
+		start += len(r.buf)
+	}
+	pos := start + fromIdx
+	if pos >= len(r.buf) {
+		pos -= len(r.buf)
+	}
+	firstChunk := len(r.buf) - pos
+	if firstChunk >= n {
+		copy(batch.Samples, r.buf[pos:pos+n])
+	} else {
+		copy(batch.Samples, r.buf[pos:])
+		copy(batch.Samples[firstChunk:], r.buf[:n-firstChunk])
+	}
+	return batch
+}
+
 // SnapshotAndReset copies the active lap samples in chronological order into a
 // pooled SampleBatch and resets the ring buffer for the new lap.
 func (r *RingBuffer) SnapshotAndReset(pool *SnapshotPool) *SampleBatch {

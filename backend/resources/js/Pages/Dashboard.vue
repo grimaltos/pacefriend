@@ -73,6 +73,9 @@ const user = computed(() => usePage().props.auth?.user);
                         <div class="text-right">
                             <div class="text-xs text-zinc-500">Mejor limpia</div>
                             <div class="font-mono text-sm font-semibold text-emerald-400">{{ formatLapTime(s.best_lap_time_ms) }}</div>
+                            <div v-if="s.optimal_lap_time_ms" class="font-mono text-[11px] text-violet-300">
+                                Óptima: {{ formatLapTime(s.optimal_lap_time_ms) }}
+                            </div>
                         </div>
                         <span v-if="s.report" class="px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-medium">
                             Informe PRO Listo

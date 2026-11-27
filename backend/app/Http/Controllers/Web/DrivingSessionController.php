@@ -38,9 +38,9 @@ class DrivingSessionController extends Controller
         abort_unless($session->user_id === $request->user()->id, 403);
 
         $session->load([
-            'track:id,name,slug,length_km,corners',
-            'activeReferenceLap:id,label,lap_time_ms,track_temp_c,air_temp_c,is_wet,source',
-            'laps:id,driving_session_id,lap_number,lap_time_ms,is_clean,incident_delta,track_temp_c,air_temp_c,is_wet,corner_metrics,created_at',
+            'track:id,name,slug,length_km,corners,sectors',
+            'activeReferenceLap:id,label,lap_time_ms,track_temp_c,air_temp_c,is_wet,fuel_level_l,fuel_used_l,source',
+            'laps:id,driving_session_id,lap_number,lap_time_ms,is_clean,is_complete,incident_delta,track_temp_c,air_temp_c,is_wet,fuel_level_l,fuel_used_l,corner_metrics,sector_metrics,created_at',
             'report',
         ]);
 

@@ -54,6 +54,15 @@ type Runner struct {
 	pitDebriefSent        bool
 	pitStoppedTicks       int
 	stintLaps             int
+
+	// Official iRacing sector (partial) tracking
+	secNum         int
+	secStartIdx    int
+	secStartTime   float64
+	secCleanEntry  bool
+	secHadDirty    bool
+	lastDirtyCum   float64
+	dirtyTracked   bool
 }
 
 // NewRunner wires all subsystems into a cohesive real-time loop.
@@ -149,10 +158,20 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 		r.lapStartFuelL = frame.FuelLevelL
 		r.prevIncidents = frame.IncidentCount
 		r.prevPct = currPct
+		r.secNum = 0
 	} else if currLap != r.activeLap {
 		crossedFinishLine := currLap == r.activeLap+1 && r.prevPct > 0.80 && currPct < 0.20 && !onPitRoad
+		willEmitLap := crossedFinishLine && r.fullFlyingLap && r.ring.Len() >= r.cfg.MinSamplesPerLap
 
-		if crossedFinishLine && r.fullFlyingLap && r.ring.Len() >= r.cfg.MinSamplesPerLap {
+		// Out-laps / non-flying laps: still salvage the final partial before the ring resets.
+		if crossedFinishLine && !willEmitLap {
+			splits := r.source.SessionMetadata().SectorSplits
+			if len(splits) >= 2 && r.secNum == len(splits) {
+				r.emitSector(frame, r.activeLap, r.secNum, splits[r.secNum-1], 1.0)
+			}
+		}
+
+		if willEmitLap {
 			r.emitCompletedLap(now, frame)
 			r.completedLaps++
 			r.stintLaps++
@@ -174,6 +193,14 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 		r.lapStartWall = now
 		r.lapStartIncidents = frame.IncidentCount
 		r.lapStartFuelL = frame.FuelLevelL
+
+		if crossedFinishLine {
+			r.startSector(1, frame, float64(currLap))
+		} else {
+			r.secNum = 0
+		}
+	} else {
+		r.checkIntermediateSectors(frame, currLap, currPct)
 	}
 
 	if frame.IncidentCount > r.prevIncidents {
@@ -182,14 +209,17 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 	}
 	r.prevIncidents = frame.IncidentCount
 
-	if frame.Sample.Flags&(telemetry.FlagOffTrack|telemetry.FlagOnPitRoad) != 0 {
+	if frame.Sample.Flags&(telemetry.FlagOffTrack|telemetry.FlagOnPitRoad|telemetry.FlagIncident) != 0 {
 		r.lapDirty = true
+		r.secHadDirty = true
+		r.lastDirtyCum = float64(currLap) + float64(currPct)
+		r.dirtyTracked = true
 	}
 
-	if r.fullFlyingLap {
-		frame.Sample.TimestampMs = r.computeRelativeMs(now, frame.SessionTimeSec)
-		r.ring.Push(frame.Sample)
-	}
+	// Record every on-track sample: flying laps are uploaded whole, while out-laps and
+	// interrupted laps still contribute their clean intermediate partials.
+	frame.Sample.TimestampMs = r.computeRelativeMs(now, frame.SessionTimeSec)
+	r.ring.Push(frame.Sample)
 
 	if r.evaluator != nil {
 		r.evaluator.Step(currLap, currPct, onPitRoad)
@@ -223,6 +253,7 @@ func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoa
 					AirTempC:      frame.AirTempC,
 					IsWet:         frame.IsWet,
 					FuelLevelL:    frame.FuelLevelL,
+					SectorSplits:  meta.SectorSplits,
 					Reason:        "session_start",
 				})
 			}
@@ -279,6 +310,84 @@ func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoa
 	}
 }
 
+// guardLaps returns the Clean Entry Guard distance (250 m) expressed in laps.
+func (r *Runner) guardLaps() float64 {
+	km := r.source.SessionMetadata().TrackLengthKm
+	if km < 1.0 {
+		km = 5.0
+	}
+	g := 0.250 / km
+	if g > 0.12 {
+		g = 0.12
+	}
+	return g
+}
+
+func (r *Runner) startSector(num int, frame *telemetry.RawFrame, startCum float64) {
+	r.secNum = num
+	r.secStartIdx = r.ring.Len()
+	r.secStartTime = frame.SessionTimeSec
+	r.secHadDirty = false
+	r.secCleanEntry = !r.dirtyTracked || (startCum-r.lastDirtyCum) > r.guardLaps()
+}
+
+func (r *Runner) checkIntermediateSectors(frame *telemetry.RawFrame, currLap int32, currPct float32) {
+	splits := r.source.SessionMetadata().SectorSplits
+	if len(splits) < 2 {
+		return
+	}
+	prev := r.prevPct
+	if currPct <= prev || currPct-prev > 0.25 {
+		return
+	}
+	for k := 1; k < len(splits); k++ {
+		b := splits[k]
+		if prev < b && b <= currPct {
+			if r.secNum == k {
+				r.emitSector(frame, currLap, k, splits[k-1], b)
+			}
+			r.startSector(k+1, frame, float64(currLap)+float64(b))
+		}
+	}
+}
+
+func (r *Runner) emitSector(frame *telemetry.RawFrame, lap int32, num int, startPct, endPct float32) {
+	if r.uploader == nil || r.secStartTime <= 0 || frame.SessionTimeSec <= r.secStartTime {
+		return
+	}
+	durMs := (frame.SessionTimeSec - r.secStartTime) * 1000.0
+	if durMs < 500 || durMs > 600000 {
+		return
+	}
+	batch := r.ring.SnapshotFrom(r.pool, r.secStartIdx)
+	if batch == nil || len(batch.Samples) < 3 {
+		if batch != nil {
+			r.pool.Release(batch)
+		}
+		return
+	}
+	meta := r.source.SessionMetadata()
+	r.uploader.EnqueueSector(telemetry.CompletedSector{
+		UserID:         r.cfg.UserID,
+		TrackSlug:      meta.TrackSlug,
+		TrackName:      meta.TrackName,
+		TrackLengthKm:  meta.TrackLengthKm,
+		CarName:        meta.CarName,
+		SessionID:      meta.SessionID,
+		SubSessionID:   meta.SubSessionID,
+		LapNumber:      lap,
+		SectorNumber:   num,
+		SectorStartPct: startPct,
+		SectorEndPct:   endPct,
+		SectorTimeMs:   uint32(durMs),
+		IsClean:        r.secCleanEntry && !r.secHadDirty,
+		TrackTempC:     frame.TrackTempC,
+		AirTempC:       frame.AirTempC,
+		IsWet:          frame.IsWet,
+		SectorSplits:   meta.SectorSplits,
+	}, batch)
+}
+
 func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFrame) {
 	batch := r.ring.SnapshotAndReset(r.pool)
 	if batch == nil {
@@ -324,6 +433,7 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 		IsWet:         crossingFrame.IsWet,
 		FuelLevelL:    crossingFrame.FuelLevelL,
 		FuelUsedL:     fuelUsedL,
+		SectorSplits:  meta.SectorSplits,
 		SampleRateHz:  r.cfg.SampleRateHz,
 	}
 

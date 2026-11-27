@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'lap_number',
     'lap_time_ms',
     'is_clean',
+    'is_complete',
     'incident_delta',
     'track_temp_c',
     'air_temp_c',
@@ -24,6 +25,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'sample_rate_hz',
     'samples',
     'corner_metrics',
+    'sector_metrics',
 ])]
 class Lap extends Model
 {
@@ -33,6 +35,7 @@ class Lap extends Model
             'lap_number' => 'integer',
             'lap_time_ms' => 'integer',
             'is_clean' => 'boolean',
+            'is_complete' => 'boolean',
             'incident_delta' => 'integer',
             'track_temp_c' => 'float',
             'air_temp_c' => 'float',
@@ -42,6 +45,7 @@ class Lap extends Model
             'sample_rate_hz' => 'integer',
             'samples' => 'array',
             'corner_metrics' => 'array',
+            'sector_metrics' => 'array',
         ];
     }
 

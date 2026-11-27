@@ -2,6 +2,8 @@
 
 namespace App\Services\Telemetry;
 
+use App\Models\ReferenceLap;
+
 class TelemetryNormalizerService
 {
     /**
@@ -51,18 +53,26 @@ class TelemetryNormalizerService
     }
 
     /**
-     * Extract physical corner execution metrics for each segmented turn of the circuit.
+     * Extract physical corner execution metrics for each segmented turn of the circuit,
+     * evaluating per-corner cleanliness with a 250 m Clean Entry Guard.
      *
      * @param  array<int, array<string, mixed>>  $samples
      * @param  array<int, array<string, mixed>>  $corners
      * @return array<int, array<string, mixed>>
      */
-    public function extractCornerBaselines(array $samples, array $corners, int $lapTimeMs = 0): array
-    {
+    public function extractCornerBaselines(
+        array $samples,
+        array $corners,
+        int $lapTimeMs = 0,
+        float $trackLengthKm = 5.0,
+        bool $lapMarkedClean = true
+    ): array {
         if ($samples === [] || $corners === []) {
             return [];
         }
 
+        $guardPct = min(0.12, 0.250 / max(1.0, $trackLengthKm));
+        $anySampleFlagged = $this->hasAnyFlaggedSample($samples);
         $results = [];
 
         foreach ($corners as $corner) {
@@ -80,14 +90,31 @@ class TelemetryNormalizerService
                 fn (array $s) => $this->isPctInArc((float) ($s['pct'] ?? 0.0), $windowStart, $windowEnd)
             ));
 
-            if (count($windowSamples) < 2) {
+            if (count($windowSamples) < 3) {
                 continue;
             }
 
-            // Sort along arc progression relative to windowStart so wrap-around corners (e.g. Spa T1) stay chronological
+            // Ensure samples actually span from before brake_pct through exit_pct (crucial for partial sector uploads)
             usort($windowSamples, fn (array $a, array $b) => $this->arcDistance($windowStart, (float) $a['pct']) <=> $this->arcDistance($windowStart, (float) $b['pct']));
+            $firstArc = $this->arcDistance($windowStart, (float) ($windowSamples[0]['pct'] ?? $windowStart));
+            $lastArc = $this->arcDistance($windowStart, (float) ($windowSamples[count($windowSamples) - 1]['pct'] ?? $windowStart));
+            $requiredArc = $this->arcDistance($windowStart, $exitPct);
+            if ($firstArc > 0.025 || $lastArc < ($requiredArc * 0.80)) {
+                continue;
+            }
 
-            $segmentTimeMs = $this->estimateSegmentDurationMs($windowSamples, $lapTimeMs);
+            // 250 m Clean Entry Guard: check [windowStart - guardPct .. windowEnd] for off-track / pit / incident flags
+            $guardStart = $this->wrapPct($windowStart - $guardPct);
+            $dirtyInGuard = false;
+            foreach ($samples as $s) {
+                if (((int) ($s['flags'] ?? 0)) !== 0 && $this->isPctInArc((float) ($s['pct'] ?? 0.0), $guardStart, $windowEnd)) {
+                    $dirtyInGuard = true;
+                    break;
+                }
+            }
+            $isCleanCorner = ! $dirtyInGuard && ($lapMarkedClean || $anySampleFlagged);
+
+            $segmentTimeMs = $this->estimateSegmentDurationMs($windowSamples, $lapTimeMs, $trackLengthKm);
 
             $brakeOnsetPct = null;
             $peakBrake = 0.0;
@@ -139,6 +166,7 @@ class TelemetryNormalizerService
             $results[$turn] = [
                 'turn' => $turn,
                 'name' => $name,
+                'is_clean' => $isCleanCorner,
                 'brake_pct' => $brakePct,
                 'apex_pct' => $apexPct,
                 'exit_pct' => $exitPct,
@@ -154,6 +182,173 @@ class TelemetryNormalizerService
         }
 
         return array_values($results);
+    }
+
+    /**
+     * Extract per-sector (partial) timings and independent cleanliness with a 250 m Clean Entry Guard.
+     *
+     * @param  array<int, array<string, mixed>>  $samples
+     * @param  array<int, array{sector: int, start_pct: float, end_pct: float}>  $sectors
+     * @return array<int, array{sector: int, start_pct: float, end_pct: float, time_ms: int, is_clean: bool}>
+     */
+    public function extractSectorMetrics(
+        array $samples,
+        array $sectors,
+        int $lapTimeMs = 0,
+        float $trackLengthKm = 5.0,
+        bool $lapMarkedClean = true
+    ): array {
+        if ($samples === [] || $sectors === []) {
+            return [];
+        }
+
+        $guardPct = min(0.12, 0.250 / max(1.0, $trackLengthKm));
+        $anySampleFlagged = $this->hasAnyFlaggedSample($samples);
+        $metrics = [];
+
+        foreach ($sectors as $sec) {
+            $num = (int) ($sec['sector'] ?? 1);
+            $startPct = (float) ($sec['start_pct'] ?? 0.0);
+            $endPct = (float) ($sec['end_pct'] ?? 1.0);
+            $span = max(0.02, $endPct - $startPct);
+
+            $secSamples = array_values(array_filter(
+                $samples,
+                static fn (array $s) => (float) ($s['pct'] ?? -1.0) >= $startPct && (float) ($s['pct'] ?? -1.0) <= $endPct
+            ));
+
+            if (count($secSamples) < 3) {
+                continue;
+            }
+
+            usort($secSamples, static fn (array $a, array $b) => ((float) $a['pct']) <=> ((float) $b['pct']));
+            $coveredSpan = (float) $secSamples[count($secSamples) - 1]['pct'] - (float) $secSamples[0]['pct'];
+            if ($coveredSpan < ($span * 0.65)) {
+                continue;
+            }
+
+            $guardStart = $this->wrapPct($startPct - $guardPct);
+            $checkEnd = $endPct >= 0.999 ? 0.9999 : $endPct;
+            $dirtyInGuard = false;
+            foreach ($samples as $s) {
+                if (((int) ($s['flags'] ?? 0)) !== 0 && $this->isPctInArc((float) ($s['pct'] ?? 0.0), $guardStart, $checkEnd)) {
+                    $dirtyInGuard = true;
+                    break;
+                }
+            }
+
+            $isClean = ! $dirtyInGuard && ($lapMarkedClean || $anySampleFlagged);
+            $rawMs = $this->estimateSegmentDurationMs($secSamples, $lapTimeMs, $trackLengthKm);
+
+            // Extrapolate small sample boundary gaps at sector start/end proportionally
+            if ($coveredSpan > 0.01 && $coveredSpan < $span) {
+                $rawMs = (int) round($rawMs * ($span / $coveredSpan));
+            }
+
+            $metrics[] = [
+                'sector' => $num,
+                'start_pct' => $startPct,
+                'end_pct' => $endPct,
+                'time_ms' => max(500, $rawMs),
+                'is_clean' => $isClean,
+            ];
+        }
+
+        // Normalize full-lap sector sum to match authoritative lap_time_ms exactly
+        if ($lapTimeMs > 5000 && count($metrics) === count($sectors)) {
+            $sum = array_sum(array_column($metrics, 'time_ms'));
+            if ($sum > 0) {
+                $scale = $lapTimeMs / $sum;
+                $running = 0;
+                $lastIdx = count($metrics) - 1;
+                foreach ($metrics as $idx => &$m) {
+                    if ($idx === $lastIdx) {
+                        $m['time_ms'] = max(500, $lapTimeMs - $running);
+                    } else {
+                        $m['time_ms'] = max(500, (int) round($m['time_ms'] * $scale));
+                        $running += $m['time_ms'];
+                    }
+                }
+                unset($m);
+            }
+        }
+
+        return $metrics;
+    }
+
+    /**
+     * Resolve target sector times from a ReferenceLap (using stored G61 sector splits if count matches,
+     * otherwise integrating directly from normalized_points) and attach delta_ms to driver sectors.
+     *
+     * @param  array<int, array<string, mixed>>  $driverSectors
+     * @param  array<int, array{sector: int, start_pct: float, end_pct: float}>  $trackSectors
+     * @return array<int, array<string, mixed>>
+     */
+    public function compareSectorsAgainstReference(
+        array $driverSectors,
+        ?ReferenceLap $referenceLap,
+        array $trackSectors,
+        float $trackLengthKm = 5.0
+    ): array {
+        if ($referenceLap === null || $driverSectors === []) {
+            return $driverSectors;
+        }
+
+        $refBySector = $this->resolveReferenceSectorMap($referenceLap, $trackSectors, $trackLengthKm);
+        if ($refBySector === []) {
+            return $driverSectors;
+        }
+
+        $out = [];
+        foreach ($driverSectors as $ds) {
+            $secNum = (int) ($ds['sector'] ?? 0);
+            if (isset($refBySector[$secNum]) && $refBySector[$secNum] > 0) {
+                $ds['target_time_ms'] = $refBySector[$secNum];
+                $ds['delta_ms'] = (int) $ds['time_ms'] - $refBySector[$secNum];
+            }
+            $out[] = $ds;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<int, array{sector: int, start_pct: float, end_pct: float}>  $trackSectors
+     * @return array<int, int>
+     */
+    public function resolveReferenceSectorMap(
+        ReferenceLap $referenceLap,
+        array $trackSectors,
+        float $trackLengthKm = 5.0
+    ): array {
+        $stored = $referenceLap->sector_splits_ms;
+        if (is_array($stored) && count($stored) === count($trackSectors)) {
+            $map = [];
+            foreach ($stored as $idx => $item) {
+                if (is_array($item) && isset($item['time_ms'])) {
+                    $secNum = (int) ($item['sector'] ?? ($idx + 1));
+                    $map[$secNum] = (int) $item['time_ms'];
+                } elseif (is_numeric($item)) {
+                    $map[$idx + 1] = (int) $item;
+                }
+            }
+            if ($map !== []) {
+                return $map;
+            }
+        }
+
+        $points = $referenceLap->normalized_points ?? [];
+        if ($points === []) {
+            return [];
+        }
+
+        $derived = $this->extractSectorMetrics($points, $trackSectors, $referenceLap->lap_time_ms, $trackLengthKm, true);
+        $map = [];
+        foreach ($derived as $d) {
+            $map[(int) $d['sector']] = (int) $d['time_ms'];
+        }
+
+        return $map;
     }
 
     /**
@@ -215,6 +410,19 @@ class TelemetryNormalizerService
         return round($wrapped, 4);
     }
 
+    /**
+     * @param  array<int, array<string, mixed>>  $samples
+     */
+    private function hasAnyFlaggedSample(array $samples): bool
+    {
+        foreach ($samples as $s) {
+            if (((int) ($s['flags'] ?? 0)) !== 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function isPctInArc(float $pct, float $start, float $end): bool
     {
         if ($start <= $end) {
@@ -252,9 +460,11 @@ class TelemetryNormalizerService
      *
      * @param  array<int, array<string, mixed>>  $windowSamples
      */
-    private function estimateSegmentDurationMs(array $windowSamples, int $lapTimeMs): int
+    private function estimateSegmentDurationMs(array $windowSamples, int $lapTimeMs, float $trackLengthKm = 5.0): int
     {
+        $trackMeters = max(1000.0, $trackLengthKm * 1000.0);
         $totalMs = 0;
+
         for ($i = 1, $n = count($windowSamples); $i < $n; $i++) {
             $prevT = (int) ($windowSamples[$i - 1]['t_ms'] ?? 0);
             $currT = (int) ($windowSamples[$i]['t_ms'] ?? 0);
@@ -271,7 +481,7 @@ class TelemetryNormalizerService
             // Physics fallback dt = ds / v_avg when normalized grids lack monotonic t_ms across wrap
             $dsPct = $this->arcDistance((float) ($windowSamples[$i - 1]['pct'] ?? 0), (float) ($windowSamples[$i]['pct'] ?? 0));
             $vAvg = max(8.0, ((float) ($windowSamples[$i - 1]['speed'] ?? 30.0) + (float) ($windowSamples[$i]['speed'] ?? 30.0)) * 0.5);
-            $totalMs += (int) round(($dsPct * 5000.0 / $vAvg) * 1000.0);
+            $totalMs += (int) round(($dsPct * $trackMeters / $vAvg) * 1000.0);
         }
 
         return max(50, $totalMs);

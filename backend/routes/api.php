@@ -12,6 +12,7 @@ Route::prefix('v1')->group(function () {
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('/telemetry/heartbeat', [TelemetryLapController::class, 'heartbeat'])->name('api.v1.telemetry.heartbeat');
         Route::post('/telemetry/briefing', [TelemetryLapController::class, 'briefing'])->name('api.v1.telemetry.briefing');
+        Route::post('/telemetry/sector', [TelemetryLapController::class, 'storeSector'])->name('api.v1.telemetry.sector');
         Route::post('/telemetry/lap', [TelemetryLapController::class, 'store'])->name('api.v1.telemetry.lap');
         Route::post('/telemetry/pit-stop', [TelemetryLapController::class, 'pitStop'])->name('api.v1.telemetry.pit_stop');
         Route::post('/telemetry/radio-test', [TelemetryLapController::class, 'radioTest'])->name('api.v1.telemetry.radio_test');

@@ -106,12 +106,18 @@ class User extends Authenticatable
             $finishMode = 'full';
         }
 
+        $sectorMode = (string) ($prefs['sector_callout_mode'] ?? 'improvements');
+        if (! in_array($sectorMode, ['full', 'improvements', 'off'], true)) {
+            $sectorMode = 'improvements';
+        }
+
         return [
             'voice_id' => $voice,
             'volume' => max(0, min(100, (int) ($prefs['radio_volume'] ?? 85))),
             'radio_beep' => (bool) ($prefs['radio_beep'] ?? true),
             'pit_wall_fx' => (bool) ($prefs['pit_wall_fx'] ?? true),
             'finish_callout_mode' => $finishMode,
+            'sector_callout_mode' => $sectorMode,
             'min_clean_laps' => max(2, min(5, (int) ($prefs['min_clean_laps'] ?? config('pacefriend.min_chronic_occurrences', 3)))),
             'fuel_alerts' => (bool) ($prefs['fuel_alerts'] ?? true),
             'tyre_temp_alerts' => (bool) ($prefs['tyre_temp_alerts'] ?? true),

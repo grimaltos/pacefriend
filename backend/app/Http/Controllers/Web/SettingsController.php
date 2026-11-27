@@ -105,6 +105,7 @@ class SettingsController extends Controller
             'radio_beep' => ['required', 'boolean'],
             'pit_wall_fx' => ['required', 'boolean'],
             'finish_callout_mode' => ['required', 'in:full,improvements,off'],
+            'sector_callout_mode' => ['nullable', 'in:full,improvements,off'],
             'min_clean_laps' => ['required', 'integer', 'min:2', 'max:5'],
             'fuel_alerts' => ['required', 'boolean'],
             'tyre_temp_alerts' => ['required', 'boolean'],
@@ -117,6 +118,7 @@ class SettingsController extends Controller
         $prefs['radio_beep'] = (bool) $validated['radio_beep'];
         $prefs['pit_wall_fx'] = (bool) $validated['pit_wall_fx'];
         $prefs['finish_callout_mode'] = $validated['finish_callout_mode'];
+        $prefs['sector_callout_mode'] = $validated['sector_callout_mode'] ?? 'improvements';
         $prefs['min_clean_laps'] = (int) $validated['min_clean_laps'];
         $prefs['fuel_alerts'] = (bool) $validated['fuel_alerts'];
         $prefs['tyre_temp_alerts'] = (bool) $validated['tyre_temp_alerts'];

@@ -17,8 +17,9 @@ class CoachDiagnosticService
     ) {}
 
     /**
-     * Evaluate the sliding window of the user's last 5 clean laps against the active
-     * weather-matched ReferenceLap and build a personalized CoachingPlan.
+     * Evaluate the sliding window of the user's recent clean partial/corner passes
+     * (even from laps that had an off-track in a completely different sector, or flying out-lap sectors)
+     * against the active weather-matched ReferenceLap and build a personalized CoachingPlan.
      *
      * @return array{clean_laps_count: int, plan: array<string, mixed>|null}
      */
@@ -30,33 +31,29 @@ class CoachDiagnosticService
     ): array {
         $radio = $user->radioSettings();
         $windowSize = (int) config('pacefriend.clean_laps_window', 5);
-        $minLaps = (int) $radio['min_clean_laps'];
+        $minPasses = (int) $radio['min_clean_laps'];
 
-        $recentCleanLaps = Lap::query()
+        $recentLaps = Lap::query()
             ->where('user_id', $user->id)
             ->where('track_id', $track->id)
             ->where('car_name', $carName)
-            ->where('is_clean', true)
             ->whereNotNull('corner_metrics')
             ->orderByDesc('id')
-            ->limit($windowSize * 2)
-            ->get();
+            ->limit($windowSize * 4)
+            ->get()
+            ->all();
 
-        // Filter outlier slow laps caused by traffic yields or spins (> 108% of median clean pace)
-        $validLaps = $this->filterPaceOutliers($recentCleanLaps->all(), $windowSize);
-        $cleanCount = count($validLaps);
+        [$bottleneck, $maxCleanPasses] = $this->detectChronicBottleneck(
+            $recentLaps,
+            $track,
+            $referenceLap,
+            $windowSize,
+            $minPasses
+        );
 
-        if ($referenceLap === null || $cleanCount < $minLaps) {
+        if ($referenceLap === null || $bottleneck === null || $maxCleanPasses < $minPasses) {
             return [
-                'clean_laps_count' => $cleanCount,
-                'plan' => null,
-            ];
-        }
-
-        $bottleneck = $this->detectChronicBottleneck($validLaps, $track, $referenceLap, $minLaps);
-        if ($bottleneck === null) {
-            return [
-                'clean_laps_count' => $cleanCount,
+                'clean_laps_count' => $maxCleanPasses,
                 'plan' => null,
             ];
         }
@@ -79,7 +76,7 @@ class CoachDiagnosticService
         ])), 0, 12);
 
         return [
-            'clean_laps_count' => $cleanCount,
+            'clean_laps_count' => $maxCleanPasses,
             'plan' => [
                 'plan_id' => "plan_{$track->slug}_t{$bottleneck['turn']}_{$planSignature}",
                 'generated_at' => now()->toIso8601String(),
@@ -114,93 +111,99 @@ class CoachDiagnosticService
     }
 
     /**
-     * @param  array<int, Lap>  $laps
-     * @return array<int, Lap>
-     */
-    private function filterPaceOutliers(array $laps, int $windowSize): array
-    {
-        if (count($laps) <= 2) {
-            return array_slice($laps, 0, $windowSize);
-        }
-
-        $times = array_map(static fn (Lap $l) => $l->lap_time_ms, $laps);
-        sort($times);
-        $median = $times[intdiv(count($times), 2)];
-        $maxAllowed = (int) round($median * (float) config('pacefriend.outlier_pace_factor', 1.08));
-
-        $filtered = array_values(array_filter(
-            $laps,
-            static fn (Lap $l) => $l->lap_time_ms <= $maxAllowed
-        ));
-
-        return array_slice($filtered, 0, $windowSize);
-    }
-
-    /**
-     * Aggregate corner losses across the sliding window and identify the highest-loss chronic corner.
+     * Aggregate per-corner clean passes independently across laps & partials, filtering
+     * traffic-slowed outliers per corner and identifying the highest-loss chronic bottleneck.
      *
-     * @param  array<int, Lap>  $validLaps
-     * @return array<string, mixed>|null
+     * @param  array<int, Lap>  $recentLaps
+     * @return array{0: array<string, mixed>|null, 1: int}
      */
     private function detectChronicBottleneck(
-        array $validLaps,
+        array $recentLaps,
         Track $track,
-        ReferenceLap $referenceLap,
+        ?ReferenceLap $referenceLap,
+        int $windowSize,
         int $minChronicCount
-    ): ?array {
-        $refCorners = $referenceLap->corner_baselines ?? [];
-        $aggregates = [];
+    ): array {
+        $refCorners = $referenceLap?->corner_baselines ?? [];
+        $passesByTurn = [];
 
-        foreach ($validLaps as $lap) {
+        foreach ($recentLaps as $lap) {
             $metrics = $lap->corner_metrics ?? [];
-            // Re-compare against current active reference in case session conditions shifted
-            $compared = $this->normalizer->compareAgainstReference($metrics, $refCorners, $track->length_km);
-
-            foreach ($compared as $cm) {
-                $turn = (int) ($cm['turn'] ?? 0);
-                if ($turn <= 0 || ! isset($cm['time_loss_ms'])) {
-                    continue;
-                }
-
-                $aggregates[$turn] ??= [
-                    'turn' => $turn,
-                    'name' => (string) ($cm['name'] ?? "Curva {$turn}"),
-                    'brake_pct' => (float) ($cm['brake_pct'] ?? 0.0),
-                    'exit_pct' => (float) ($cm['exit_pct'] ?? 0.0),
-                    'losses' => [],
-                    'early_brakes' => [],
-                    'late_throttles' => [],
-                    'apex_speed_deltas' => [],
-                    'apex_brake_excesses' => [],
-                ];
-
-                $aggregates[$turn]['losses'][] = (int) $cm['time_loss_ms'];
-                $aggregates[$turn]['early_brakes'][] = (float) ($cm['early_brake_m'] ?? 0.0);
-                $aggregates[$turn]['late_throttles'][] = (float) ($cm['late_throttle_m'] ?? 0.0);
-                $aggregates[$turn]['apex_speed_deltas'][] = (float) ($cm['apex_speed_delta_kmh'] ?? 0.0);
-                $aggregates[$turn]['apex_brake_excesses'][] = (float) ($cm['apex_brake_excess'] ?? 0.0);
-            }
-        }
-
-        $minLossThreshold = (int) config('pacefriend.min_corner_loss_ms', 80);
-        $bestCandidate = null;
-
-        foreach ($aggregates as $agg) {
-            $lossLaps = array_filter($agg['losses'], static fn (int $ms) => $ms >= ($minLossThreshold / 2));
-            if (count($lossLaps) < $minChronicCount) {
+            if ($metrics === []) {
                 continue;
             }
 
-            $avgLoss = (int) round(array_sum($agg['losses']) / count($agg['losses']));
+            $compared = $refCorners !== []
+                ? $this->normalizer->compareAgainstReference($metrics, $refCorners, $track->length_km)
+                : $metrics;
+
+            foreach ($compared as $cm) {
+                $turn = (int) ($cm['turn'] ?? 0);
+                if ($turn <= 0) {
+                    continue;
+                }
+
+                // Respect per-corner Clean Entry Guard; fall back to lap->is_clean for legacy rows
+                $isCleanPass = array_key_exists('is_clean', $cm)
+                    ? (bool) $cm['is_clean']
+                    : (bool) $lap->is_clean;
+
+                if (! $isCleanPass) {
+                    continue;
+                }
+
+                $passesByTurn[$turn][] = $cm;
+            }
+        }
+
+        $maxCleanPasses = 0;
+        $minLossThreshold = (int) config('pacefriend.min_corner_loss_ms', 80);
+        $bestCandidate = null;
+
+        foreach ($passesByTurn as $turn => $rawPasses) {
+            $filtered = $this->filterCornerSegmentOutliers($rawPasses, $windowSize);
+            $count = count($filtered);
+            if ($count > $maxCleanPasses) {
+                $maxCleanPasses = $count;
+            }
+
+            if ($referenceLap === null || $count < $minChronicCount) {
+                continue;
+            }
+
+            $losses = [];
+            $earlyBrakes = [];
+            $lateThrottles = [];
+            $apexSpeedDeltas = [];
+            $apexBrakeExcesses = [];
+
+            foreach ($filtered as $cm) {
+                if (! isset($cm['time_loss_ms'])) {
+                    continue;
+                }
+                $losses[] = (int) $cm['time_loss_ms'];
+                $earlyBrakes[] = (float) ($cm['early_brake_m'] ?? 0.0);
+                $lateThrottles[] = (float) ($cm['late_throttle_m'] ?? 0.0);
+                $apexSpeedDeltas[] = (float) ($cm['apex_speed_delta_kmh'] ?? 0.0);
+                $apexBrakeExcesses[] = (float) ($cm['apex_brake_excess'] ?? 0.0);
+            }
+
+            $lossPasses = array_filter($losses, static fn (int $ms) => $ms >= ($minLossThreshold / 2));
+            if (count($lossPasses) < $minChronicCount || $losses === []) {
+                continue;
+            }
+
+            $avgLoss = (int) round(array_sum($losses) / count($losses));
             if ($avgLoss < $minLossThreshold) {
                 continue;
             }
 
             if ($bestCandidate === null || $avgLoss > $bestCandidate['avg_time_loss_ms']) {
-                $avgEarlyBrakeM = array_sum($agg['early_brakes']) / count($agg['early_brakes']);
-                $avgLateThrottleM = array_sum($agg['late_throttles']) / count($agg['late_throttles']);
-                $avgApexSpeedDelta = array_sum($agg['apex_speed_deltas']) / count($agg['apex_speed_deltas']);
-                $avgApexBrakeExcess = array_sum($agg['apex_brake_excesses']) / count($agg['apex_brake_excesses']);
+                $sample0 = $filtered[0];
+                $avgEarlyBrakeM = array_sum($earlyBrakes) / count($earlyBrakes);
+                $avgLateThrottleM = array_sum($lateThrottles) / count($lateThrottles);
+                $avgApexSpeedDelta = array_sum($apexSpeedDeltas) / count($apexSpeedDeltas);
+                $avgApexBrakeExcess = array_sum($apexBrakeExcesses) / count($apexBrakeExcesses);
 
                 $primaryIssue = $this->classifyPrimaryIssue(
                     $avgEarlyBrakeM,
@@ -210,10 +213,10 @@ class CoachDiagnosticService
                 );
 
                 $bestCandidate = [
-                    'turn' => $agg['turn'],
-                    'name' => $agg['name'],
-                    'brake_pct' => $agg['brake_pct'],
-                    'exit_pct' => $agg['exit_pct'],
+                    'turn' => (int) $turn,
+                    'name' => (string) ($sample0['name'] ?? "Curva {$turn}"),
+                    'brake_pct' => (float) ($sample0['brake_pct'] ?? 0.0),
+                    'exit_pct' => (float) ($sample0['exit_pct'] ?? 0.0),
                     'avg_time_loss_ms' => $avgLoss,
                     'avg_early_brake_m' => round($avgEarlyBrakeM, 1),
                     'avg_late_throttle_m' => round($avgLateThrottleM, 1),
@@ -224,7 +227,32 @@ class CoachDiagnosticService
             }
         }
 
-        return $bestCandidate;
+        return [$bestCandidate, $maxCleanPasses];
+    }
+
+    /**
+     * Filter traffic/yellow-flag lifts on a specific corner (> 122% of median segment_time_ms).
+     *
+     * @param  array<int, array<string, mixed>>  $passes
+     * @return array<int, array<string, mixed>>
+     */
+    private function filterCornerSegmentOutliers(array $passes, int $windowSize): array
+    {
+        if (count($passes) <= 2) {
+            return array_slice($passes, 0, $windowSize);
+        }
+
+        $segTimes = array_map(static fn (array $p) => (int) ($p['segment_time_ms'] ?? 0), $passes);
+        sort($segTimes);
+        $median = max(100, $segTimes[intdiv(count($segTimes), 2)]);
+        $maxAllowed = (int) round($median * 1.22);
+
+        $valid = array_values(array_filter(
+            $passes,
+            static fn (array $p) => (int) ($p['segment_time_ms'] ?? 0) <= $maxAllowed
+        ));
+
+        return array_slice($valid, 0, $windowSize);
     }
 
     private function classifyPrimaryIssue(
@@ -251,7 +279,6 @@ class CoachDiagnosticService
 
     /**
      * Translate diagnostic metrics into clear, jargon-free Spanish race engineer instructions.
-     * Pre-brake includes the driver's spoken callsign naturally; post-exit stays ultra-concise.
      *
      * @param  array<string, mixed>  $b
      * @return array{0: string, 1: string}

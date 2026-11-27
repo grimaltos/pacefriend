@@ -175,7 +175,8 @@ class ReferenceLapController extends Controller
         $isWet = $request->has('is_wet') ? $request->boolean('is_wet') : (bool) $parsed['is_wet'];
 
         $normalized = $this->normalizer->normalizeSamples($parsed['samples']);
-        $baselines = $this->normalizer->extractCornerBaselines($parsed['samples'], $track->corners ?? [], $parsed['lap_time_ms']);
+        $baselines = $this->normalizer->extractCornerBaselines($parsed['samples'], $track->corners ?? [], $parsed['lap_time_ms'], $track->length_km, true);
+        $sectorSplits = $this->normalizer->extractSectorMetrics($parsed['samples'], $track->effectiveSectors(), $parsed['lap_time_ms'], $track->length_km, true);
 
         ReferenceLap::query()->create([
             'user_id' => $request->user()->id,
@@ -191,6 +192,7 @@ class ReferenceLapController extends Controller
             'source' => $parsed['source'],
             'normalized_points' => $normalized,
             'corner_baselines' => $baselines,
+            'sector_splits_ms' => $sectorSplits,
         ]);
 
         return back()->with('success', "Vuelta de referencia cargada para {$track->name} ({$trackTemp} °C asfalto).");
@@ -306,7 +308,16 @@ class ReferenceLapController extends Controller
         $baselines = $this->normalizer->extractCornerBaselines(
             $lap->samples ?? [],
             $lap->track->corners ?? [],
-            $lap->lap_time_ms
+            $lap->lap_time_ms,
+            $lap->track->length_km,
+            true
+        );
+        $sectorSplits = $this->normalizer->extractSectorMetrics(
+            $lap->samples ?? [],
+            $lap->track->effectiveSectors(),
+            $lap->lap_time_ms,
+            $lap->track->length_km,
+            true
         );
 
         ReferenceLap::query()->create([
@@ -323,6 +334,7 @@ class ReferenceLapController extends Controller
             'source' => 'promoted_lap',
             'normalized_points' => $normalized,
             'corner_baselines' => $baselines,
+            'sector_splits_ms' => $sectorSplits,
         ]);
 
         return back()->with('success', "Vuelta #{$lap->lap_number} guardada en tu biblioteca de referencias ({$lap->track_temp_c} °C).");

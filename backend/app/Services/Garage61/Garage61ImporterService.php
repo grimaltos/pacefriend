@@ -157,8 +157,20 @@ class Garage61ImporterService
         $cornerBaselines = $this->normalizer->extractCornerBaselines(
             $samples,
             $track->corners ?? [],
-            $normalizedMeta['lap_time_ms']
+            $normalizedMeta['lap_time_ms'],
+            $track->length_km,
+            true
         );
+
+        $sectorSplitsMs = $normalizedMeta['sector_splits_ms'] !== []
+            ? $normalizedMeta['sector_splits_ms']
+            : $this->normalizer->extractSectorMetrics(
+                $samples,
+                $track->effectiveSectors(),
+                $normalizedMeta['lap_time_ms'],
+                $track->length_km,
+                true
+            );
 
         $driverLabel = $normalizedMeta['driver_name'] !== ''
             ? "G61 · {$normalizedMeta['driver_name']} ({$normalizedMeta['track_temp_c']} °C)"
@@ -180,6 +192,7 @@ class Garage61ImporterService
             'driver_name' => $normalizedMeta['driver_name'] ?: null,
             'normalized_points' => $normalizedPoints,
             'corner_baselines' => $cornerBaselines,
+            'sector_splits_ms' => $sectorSplitsMs,
         ]);
     }
 
@@ -413,6 +426,19 @@ class Garage61ImporterService
             ? round((float) $lap['fuelUsed'], 3)
             : null;
 
+        $sectorSplitsMs = [];
+        if (is_array($lap['sectors'] ?? null)) {
+            foreach (array_values($lap['sectors']) as $idx => $sec) {
+                $secTime = (float) ($sec['sectorTime'] ?? 0.0);
+                if ($secTime > 0.2 && empty($sec['incomplete'])) {
+                    $sectorSplitsMs[] = [
+                        'sector' => $idx + 1,
+                        'time_ms' => (int) round($secTime * 1000.0),
+                    ];
+                }
+            }
+        }
+
         return [
             'id' => (string) ($lap['id'] ?? ''),
             'lap_time_ms' => $lapTimeMs,
@@ -421,6 +447,7 @@ class Garage61ImporterService
             'is_wet' => $isWet,
             'fuel_level_l' => $fuelLevel,
             'fuel_used_l' => $fuelUsed,
+            'sector_splits_ms' => $sectorSplitsMs,
             'driver_name' => $driverName,
             'track_name' => $trackName !== '' ? $trackName : $fallbackTrack,
             'track_slug' => Str::slug($trackName !== '' ? $trackName : $fallbackTrack),

@@ -27,6 +27,7 @@ func (s *stubSource) SessionMetadata() telemetry.SessionMetadata         { retur
 func TestRunnerDiscardsOutLapAndUploadsCleanAndDirtyLaps(t *testing.T) {
 	var mu sync.Mutex
 	var uploaded []telemetry.CompletedLap
+	var uploadedSectors []telemetry.CompletedSector
 	var sessionEndCalled bool
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +36,19 @@ func TestRunnerDiscardsOutLapAndUploadsCleanAndDirtyLaps(t *testing.T) {
 			sessionEndCalled = true
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path == "/api/v1/telemetry/sector" {
+			var sec telemetry.CompletedSector
+			if err := json.NewDecoder(r.Body).Decode(&sec); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			uploadedSectors = append(uploadedSectors, sec)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok","sector_stored":true}`))
 			return
 		}
 		var lap telemetry.CompletedLap
@@ -66,6 +80,7 @@ func TestRunnerDiscardsOutLapAndUploadsCleanAndDirtyLaps(t *testing.T) {
 			TrackName:     "Circuit de Spa-Francorchamps",
 			TrackLengthKm: 7.004,
 			CarName:       "Porsche 911 GT3 R (992)",
+			SectorSplits:  []float32{0.0, 0.341, 0.685},
 		},
 	}
 
@@ -91,17 +106,17 @@ func TestRunnerDiscardsOutLapAndUploadsCleanAndDirtyLaps(t *testing.T) {
 	// 2. Full clean flying Lap 1 (0.00 -> 0.98, 50 samples)
 	for i := 0; i < 50; i++ {
 		pct := float32(i) * 0.02
-		simSec += 0.05
+		simSec += 1.0
 		runner.ProcessFrame(baseTime, &telemetry.RawFrame{
 			SessionTimeSec: simSec,
 			Sample:         telemetry.Sample{Lap: 1, LapDistPct: pct, Speed: 70.0, Throttle: 1.0, Gear: 6},
 		})
 	}
 
-	// 3. Full dirty flying Lap 2 (has OffTrack excursion mid-lap)
+	// 3. Full dirty flying Lap 2 (has OffTrack excursion mid-lap in S2 at pct=0.40)
 	for i := 0; i < 50; i++ {
 		pct := float32(i) * 0.02
-		simSec += 0.05
+		simSec += 1.0
 		var flags telemetry.SampleFlags
 		if i == 20 {
 			flags = telemetry.FlagOffTrack
@@ -140,12 +155,17 @@ func TestRunnerDiscardsOutLapAndUploadsCleanAndDirtyLaps(t *testing.T) {
 		t.Fatalf("unexpected Lap 2 metadata: lap=%d clean=%v timeMs=%d",
 			uploaded[1].LapNumber, uploaded[1].IsClean, uploaded[1].LapTimeMs)
 	}
+	// Lap 2 S1 (index 2) was clean, while Lap 2 S2 (index 3) had OffTrack at pct=0.40!
+	if len(uploadedSectors) != 4 || !uploadedSectors[2].IsClean || uploadedSectors[3].IsClean {
+		t.Fatalf("expected 4 intermediate sectors with Lap 2 S1=clean & S2=dirty, got %+v", uploadedSectors)
+	}
 }
 
 func TestRunnerSendsBriefingFuelMetricsAndPitTyreDebrief(t *testing.T) {
 	var mu sync.Mutex
 	var briefings []transport.BriefingRequest
 	var pitStops []transport.PitStopRequest
+	var sectors []telemetry.CompletedSector
 	var laps []telemetry.CompletedLap
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +178,13 @@ func TestRunnerSendsBriefingFuelMetricsAndPitTyreDebrief(t *testing.T) {
 			briefings = append(briefings, b)
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"status":"ok","audio_settings":{"volume":75}}`))
+		case "/api/v1/telemetry/sector":
+			var sec telemetry.CompletedSector
+			_ = json.NewDecoder(r.Body).Decode(&sec)
+			mu.Lock()
+			sectors = append(sectors, sec)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok","sector_stored":true}`))
 		case "/api/v1/telemetry/pit-stop":
 			var p transport.PitStopRequest
 			_ = json.NewDecoder(r.Body).Decode(&p)
@@ -194,6 +221,7 @@ func TestRunnerSendsBriefingFuelMetricsAndPitTyreDebrief(t *testing.T) {
 			TrackName:     "Circuit de Spa-Francorchamps",
 			TrackLengthKm: 7.004,
 			CarName:       "Porsche 911 GT3 R (992)",
+			SectorSplits:  []float32{0.0, 0.341, 0.685},
 		},
 	}
 
@@ -206,19 +234,20 @@ func TestRunnerSendsBriefingFuelMetricsAndPitTyreDebrief(t *testing.T) {
 	now := time.Now()
 	// 1. Out-lap leaving pits onto track with 50L fuel -> triggers session_start briefing
 	runner.ProcessFrame(now, &telemetry.RawFrame{
-		IsOnTrack:  true,
-		TrackTempC: 24.0,
-		AirTempC:   18.5,
-		FuelLevelL: 50.0,
-		Sample:     telemetry.Sample{Lap: 0, LapDistPct: 0.95, Speed: 45.0, Gear: 3},
+		IsOnTrack:      true,
+		SessionTimeSec: 8.0,
+		TrackTempC:     24.0,
+		AirTempC:       18.5,
+		FuelLevelL:     50.0,
+		Sample:         telemetry.Sample{Lap: 0, LapDistPct: 0.95, Speed: 45.0, Gear: 3},
 	})
 
-	// 2. Clean Lap 1 burning 2.8L (50.0 -> 47.2)
+	// 2. Clean Lap 1 burning 2.8L (50.0 -> 47.2) across S1 (0..0.341), S2 (0.341..0.685), S3
 	for i := 0; i < 20; i++ {
 		pct := float32(i) * 0.05
 		runner.ProcessFrame(now, &telemetry.RawFrame{
 			IsOnTrack:      true,
-			SessionTimeSec: 10.0 + float64(i)*0.5,
+			SessionTimeSec: 10.0 + float64(i)*2.0,
 			TrackTempC:     24.0,
 			FuelLevelL:     50.0 - float32(i)*0.14,
 			Sample:         telemetry.Sample{Lap: 1, LapDistPct: pct, Speed: 68.0, Gear: 5},
@@ -255,6 +284,9 @@ func TestRunnerSendsBriefingFuelMetricsAndPitTyreDebrief(t *testing.T) {
 	}
 	if len(laps) != 1 || laps[0].FuelLevelL != 47.2 || laps[0].FuelUsedL < 2.7 {
 		t.Fatalf("expected Lap 1 fuel metrics, got %+v", laps)
+	}
+	if len(sectors) != 2 || sectors[0].SectorNumber != 1 || sectors[1].SectorNumber != 2 || !sectors[0].IsClean {
+		t.Fatalf("expected 2 intermediate sectors (S1 & S2) uploaded mid-lap, got %+v", sectors)
 	}
 	if len(pitStops) != 1 || pitStops[0].LFTempC != 98.5 {
 		t.Fatalf("expected 1 pit/garage tyre debrief with LF=98.5, got %+v", pitStops)

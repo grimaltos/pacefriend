@@ -531,6 +531,7 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 	driverCarIdx := -1
 	currentCarIdx := -2
 	inDriversList := false
+	inSectorsList := false
 
 	lines := strings.Split(string(raw), "\n")
 	for _, line := range lines {
@@ -542,17 +543,24 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 		// Track top-level section transitions
 		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && strings.HasSuffix(trimmed, ":") {
 			inDriversList = false
+			inSectorsList = false
 			currentCarIdx = -2
 			continue
 		}
 
 		if trimmed == "Drivers:" {
 			inDriversList = true
+			inSectorsList = false
 			currentCarIdx = -2
 			continue
 		}
+		if trimmed == "Sectors:" {
+			inSectorsList = true
+			inDriversList = false
+			continue
+		}
 
-		if inDriversList && strings.HasPrefix(trimmed, "- ") {
+		if (inDriversList || inSectorsList) && strings.HasPrefix(trimmed, "- ") {
 			currentCarIdx = -2
 			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
 		}
@@ -563,6 +571,15 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 		}
 		key := strings.TrimSpace(trimmed[:colonIdx])
 		val := strings.Trim(strings.TrimSpace(trimmed[colonIdx+1:]), `"'`)
+
+		if inSectorsList {
+			if key == "SectorStartPct" {
+				if pct, err := strconv.ParseFloat(val, 32); err == nil && pct >= 0.0 && pct < 1.0 {
+					meta.SectorSplits = append(meta.SectorSplits, float32(pct))
+				}
+			}
+			continue
+		}
 
 		if !inDriversList {
 			switch key {

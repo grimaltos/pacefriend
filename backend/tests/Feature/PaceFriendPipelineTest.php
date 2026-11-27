@@ -265,6 +265,81 @@ class PaceFriendPipelineTest extends TestCase
         $this->assertStringContainsString('99 grados', $pitResp->json('radio_callouts.0.text'));
     }
 
+    public function test_dirty_laps_still_train_coach_from_clean_partials_and_compute_optimal_lap(): void
+    {
+        $user = User::factory()->create([
+            'name' => 'Vicent Grimaltos',
+            'driver_callsign' => 'Vicent',
+            'preferences' => ['min_clean_laps' => 2],
+        ]);
+        $token = $user->createToken('SimRig')->plainTextToken;
+
+        // Lap 1 & Lap 2 BOTH have an off-track in Sector 3 (pct = 0.91, flags = 1),
+        // while Sector 1 (Turn 1 La Source) and Sector 2 are 100% clean!
+        for ($lapNum = 1; $lapNum <= 2; $lapNum++) {
+            $samples = $this->buildDriverEarlyBrakingSamples(140000);
+            foreach ($samples as &$s) {
+                if ($s['pct'] >= 0.90 && $s['pct'] <= 0.92) {
+                    $s['flags'] = 1; // FlagOffTrack in Sector 3 only
+                }
+            }
+            unset($s);
+
+            $resp = $this->withHeader('Authorization', "Bearer {$token}")
+                ->postJson('/api/v1/telemetry/lap', [
+                    'track_slug' => 'spa-up',
+                    'car_name' => 'Porsche 911 GT3 R (992)',
+                    'session_id' => 9101,
+                    'sub_session_id' => 9201,
+                    'lap_number' => $lapNum,
+                    'lap_time_ms' => 140000,
+                    'is_clean' => false,
+                    'incident_delta' => 1,
+                    'track_temp_c' => 22.0,
+                    'air_temp_c' => 18.0,
+                    'sector_splits' => [0.0, 0.341, 0.685],
+                    'samples' => $samples,
+                ]);
+            $resp->assertCreated();
+        }
+
+        // Even with 0 full clean laps, Turn 1 (Sector 1) has 2 clean passes -> coaching plan MUST be active!
+        $session = DrivingSession::query()->where('user_id', $user->id)->firstOrFail();
+        $this->assertSame(0, $session->clean_laps_count);
+        $this->assertNotNull($session->active_coaching_plan);
+        $this->assertSame(1, $session->active_coaching_plan['focus_turn']);
+        $this->assertNull($session->optimal_lap_time_ms, 'Sector 3 has not been completed cleanly yet');
+
+        // Now complete Sector 3 cleanly (e.g. from Out-lap or Lap 3 partial) -> Optimal Lap unlocks!
+        $cleanS3Samples = array_values(array_filter(
+            $this->buildDriverEarlyBrakingSamples(139000),
+            static fn (array $s) => $s['pct'] >= 0.68 && $s['pct'] <= 0.996
+        ));
+
+        $secResp = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/sector', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 9101,
+                'sub_session_id' => 9201,
+                'lap_number' => 3,
+                'sector_number' => 3,
+                'sector_start_pct' => 0.685,
+                'sector_end_pct' => 1.0,
+                'sector_time_ms' => 42500,
+                'is_clean' => true,
+                'track_temp_c' => 22.0,
+                'air_temp_c' => 18.0,
+                'sector_splits' => [0.0, 0.341, 0.685],
+                'samples' => $cleanS3Samples,
+            ]);
+        $secResp->assertCreated();
+
+        $session->refresh();
+        $this->assertNotNull($session->optimal_lap_time_ms);
+        $this->assertGreaterThan(100000, $session->optimal_lap_time_ms);
+    }
+
     /**
      * Synthesize a byte-exact binary .ibt telemetry buffer for testing IbtFileParserService.
      */

@@ -92,6 +92,65 @@ class RadioEngineerService
     }
 
     /**
+     * Build mid-lap partial/sector crossing callout (e.g. S1, S2) respecting sector_callout_mode.
+     *
+     * @return array<int, array{id: string, text: string, audio_url: string, audio_sha256: string}>
+     */
+    public function buildSectorCrossingCallouts(
+        User $user,
+        int $lapNumber,
+        int $sectorNumber,
+        int $sectorTimeMs,
+        bool $isClean,
+        ?int $previousBestSectorMs,
+        ?int $targetSectorMs,
+        bool $newAutopilotRef = false,
+        ?ReferenceLap $currentRef = null
+    ): array {
+        $radio = $user->radioSettings();
+        $mode = $radio['sector_callout_mode'] ?? 'improvements';
+        $callsign = $user->spokenCallsign();
+        $sectorLabel = $this->spokenSectorLabel($sectorNumber);
+        $sentences = [];
+
+        $beatTarget = $isClean && $targetSectorMs !== null && $sectorTimeMs <= $targetSectorMs;
+        $isPurple = $isClean && $previousBestSectorMs !== null && $sectorTimeMs < ($previousBestSectorMs - 60);
+        $matchedTarget = $isClean && $targetSectorMs !== null && ($sectorTimeMs - $targetSectorMs) <= 80;
+
+        if ($mode === 'full' || ($mode === 'improvements' && ($beatTarget || $isPurple || $matchedTarget))) {
+            if (! $isClean) {
+                $uc = ucfirst($sectorLabel);
+                $sentences[] = "{$uc} sucio, mantenemos foco en el resto de la vuelta.";
+            } elseif ($beatTarget) {
+                $sentences[] = "¡Brutal {$sectorLabel} {$callsign}! Más rápido que el target.";
+            } elseif ($isPurple && $previousBestSectorMs !== null) {
+                $gain = $this->spokenDelta($previousBestSectorMs - $sectorTimeMs);
+                $sentences[] = "¡Récord personal en el {$sectorLabel}! Bajas {$gain}.";
+            } elseif ($matchedTarget) {
+                $sentences[] = "¡Muy buen {$sectorLabel}, calcando a la referencia!";
+            } elseif ($targetSectorMs !== null) {
+                $uc = ucfirst($sectorLabel);
+                $gap = max(0, $sectorTimeMs - $targetSectorMs);
+                $sentences[] = "{$uc} limpio, a {$this->spokenDelta($gap)} del objetivo.";
+            } else {
+                $uc = ucfirst($sectorLabel);
+                $sentences[] = "{$uc} limpio, {$this->spokenLapTime($sectorTimeMs)}.";
+            }
+        }
+
+        if ($newAutopilotRef && $currentRef !== null) {
+            $sentences[] = "Objetivo automático fijado en {$this->spokenLapTime($currentRef->lap_time_ms)}.";
+        }
+
+        if ($sentences === []) {
+            return [];
+        }
+
+        $text = implode(' ', $sentences);
+        return [$this->makeCallout("lap_{$lapNumber}_s{$sectorNumber}_".substr(md5($text), 0, 6), $text, $radio)];
+    }
+
+    /**
      * Build start/finish line lap time callout, positive reinforcement, Autopilot update, and fuel alerts.
      *
      * @param  array<string, mixed>|null  $previousCoachingPlan
@@ -129,9 +188,19 @@ class RadioEngineerService
             $sentences = [];
 
             if (! $lap->is_clean) {
-                $sentences[] = $shortForTurn1
-                    ? "Vuelta sucia, {$spokenTime}."
-                    : "Vuelta con límites, {$spokenTime}. Cabeza fría para esta.";
+                $cleanSectorCount = count(array_filter(
+                    $lap->sector_metrics ?? [],
+                    static fn (array $sm) => ! empty($sm['is_clean'])
+                ));
+                if (! $shortForTurn1 && $improvedCorner !== null) {
+                    $sentences[] = "Vuelta con límites, pero ¡muy bien {$improvedCorner['name']}, recortas {$this->spokenDelta($improvedCorner['gain_ms'])} y aprovechamos tus parciales limpios!";
+                } elseif (! $shortForTurn1 && $cleanSectorCount > 0) {
+                    $sentences[] = "Vuelta con límites, {$spokenTime}. Guardamos tus {$cleanSectorCount} parciales limpios para el análisis.";
+                } else {
+                    $sentences[] = $shortForTurn1
+                        ? "Vuelta sucia, {$spokenTime}."
+                        : "Vuelta con límites, {$spokenTime}. Cabeza fría para esta.";
+                }
             } elseif ($beatTarget) {
                 $sentences[] = "¡Vueltón {$callsign}! {$spokenTime}, acabas de batir el objetivo.";
             } elseif ($isNewSessionPb && $previousBestMs !== null) {
@@ -380,6 +449,18 @@ class RadioEngineerService
             return '';
         }
         return Str::before($trimmed, ' ');
+    }
+
+    private function spokenSectorLabel(int $sectorNumber): string
+    {
+        return match ($sectorNumber) {
+            1 => 'primer parcial',
+            2 => 'segundo parcial',
+            3 => 'tercer parcial',
+            4 => 'cuarto parcial',
+            5 => 'quinto parcial',
+            default => "parcial {$sectorNumber}",
+        };
     }
 
     /**

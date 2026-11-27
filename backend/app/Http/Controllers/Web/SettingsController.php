@@ -10,6 +10,8 @@ use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use ZipArchive;
 
 class SettingsController extends Controller
 {
@@ -59,6 +61,7 @@ class SettingsController extends Controller
                 ->orderByDesc('created_at')
                 ->get(['id', 'name', 'last_used_at', 'created_at']),
             'apiBaseUrl' => url('/'),
+            'clientExeAvailable' => $this->resolveClientExePath() !== null,
         ]);
     }
 
@@ -154,10 +157,81 @@ class SettingsController extends Controller
             ->with('success', 'Token de conexión generado. Cópialo ahora para tu cliente local en Windows.');
     }
 
+    public function downloadClientExe(): BinaryFileResponse
+    {
+        $exePath = $this->resolveClientExePath();
+        abort_if($exePath === null, 404, 'El ejecutable pacefriend-client.exe no está compilado aún en este servidor.');
+
+        return response()->download($exePath, 'pacefriend-client.exe', [
+            'Content-Type' => 'application/vnd.microsoft.portable-executable',
+        ]);
+    }
+
+    public function downloadClientBundle(Request $request): BinaryFileResponse
+    {
+        $exePath = $this->resolveClientExePath();
+        abort_if($exePath === null, 404, 'El ejecutable pacefriend-client.exe no está compilado aún en este servidor.');
+
+        $user = $request->user();
+        $token = $user->createToken('Windows App ('.now()->format('d/m H:i').')');
+
+        $configJson = json_encode([
+            'api_url' => url('/'),
+            'api_token' => $token->plainTextToken,
+            'mute' => false,
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+        $readme = implode("\r\n", [
+            'PaceFriend — Cliente Ultraligero para Windows (iRacing)',
+            '=======================================================',
+            '',
+            "Piloto vinculado: {$user->effectiveCallsign()} ({$user->email})",
+            'Servidor API:     '.url('/'),
+            '',
+            'INSTRUCCIONES:',
+            '1. Extrae esta carpeta "PaceFriend" completa donde prefieras (ej. Escritorio o Documentos).',
+            '2. Mantén juntos "pacefriend-client.exe" y "pacefriend.json" en la misma carpeta.',
+            '3. Haz doble clic en "pacefriend-client.exe": aparecerá el icono junto al reloj de Windows.',
+            '   (Si Windows SmartScreen pregunta la primera vez, pulsa "Más información" -> "Ejecutar de todas formas").',
+            '',
+        ]);
+
+        $tmpZip = tempnam(sys_get_temp_dir(), 'pf_bundle_').'.zip';
+        $zip = new ZipArchive();
+        if ($zip->open($tmpZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            abort(500, 'No se pudo generar el paquete ZIP.');
+        }
+
+        $zip->addFile($exePath, 'PaceFriend/pacefriend-client.exe');
+        $zip->addFromString('PaceFriend/pacefriend.json', (string) $configJson);
+        $zip->addFromString('PaceFriend/LEEME.txt', $readme);
+        $zip->close();
+
+        return response()
+            ->download($tmpZip, 'PaceFriend-Windows.zip', ['Content-Type' => 'application/zip'])
+            ->deleteFileAfterSend(true);
+    }
+
     public function revokeToken(Request $request, int $tokenId): RedirectResponse
     {
         $request->user()->tokens()->where('id', $tokenId)->delete();
 
         return back()->with('success', 'Token revocado correctamente.');
+    }
+
+    private function resolveClientExePath(): ?string
+    {
+        $candidates = [
+            public_path('downloads/pacefriend-client.exe'),
+            base_path('../client/bin/pacefriend-client.exe'),
+        ];
+
+        foreach ($candidates as $path) {
+            if (is_file($path) && filesize($path) > 1024) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 }

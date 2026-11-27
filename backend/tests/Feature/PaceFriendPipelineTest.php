@@ -127,6 +127,27 @@ class PaceFriendPipelineTest extends TestCase
         $this->assertStringContainsString('La Source', $session->report->narrative_markdown);
     }
 
+    public function test_user_can_download_preconfigured_windows_client_zip_bundle(): void
+    {
+        $user = User::factory()->create(['driver_callsign' => 'Vicent']);
+
+        $resp = $this->actingAs($user)->get('/settings/client-bundle');
+        $resp->assertOk();
+        $this->assertSame('application/zip', $resp->headers->get('Content-Type'));
+
+        $zipPath = $resp->baseResponse->getFile()->getPathname();
+        $zip = new \ZipArchive();
+        $this->assertTrue($zip->open($zipPath) === true);
+
+        $this->assertNotFalse($zip->locateName('PaceFriend/pacefriend-client.exe'));
+        $jsonRaw = $zip->getFromName('PaceFriend/pacefriend.json');
+        $this->assertNotFalse($jsonRaw);
+        $decoded = json_decode((string) $jsonRaw, true);
+        $this->assertNotEmpty($decoded['api_token']);
+        $this->assertNotEmpty($decoded['api_url']);
+        $zip->close();
+    }
+
     /**
      * Synthesize a byte-exact binary .ibt telemetry buffer for testing IbtFileParserService.
      */

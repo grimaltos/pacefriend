@@ -46,5 +46,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/settings/garage61/callback', [SettingsController::class, 'handleGarage61Callback'])->name('settings.garage61.callback');
     Route::put('/settings/garage61', [SettingsController::class, 'updateGarage61'])->name('settings.garage61.update');
     Route::post('/settings/tokens', [SettingsController::class, 'createToken'])->name('settings.tokens.create');
+    Route::get('/settings/client-bundle', [SettingsController::class, 'downloadClientBundle'])->name('settings.client.bundle');
+    Route::get('/settings/client-exe', [SettingsController::class, 'downloadClientExe'])->name('settings.client.exe');
     Route::delete('/settings/tokens/{tokenId}', [SettingsController::class, 'revokeToken'])->name('settings.tokens.revoke');
 });

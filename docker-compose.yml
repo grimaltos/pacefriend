@@ -1,8 +1,8 @@
 services:
   app:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: pacefriend_app
     restart: unless-stopped
     depends_on:

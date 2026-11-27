@@ -1,14 +1,24 @@
-# Stage 1: Build Vue 3 + Tailwind CSS v4 frontend bundle
+# Stage 1: Cross-compile ultralight Windows System Tray client (.exe)
+FROM golang:1.23-alpine AS client-builder
+WORKDIR /src/client
+COPY client/go.mod ./
+COPY client/ ./
+RUN mkdir -p /out \
+    && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+        -trimpath -ldflags="-s -w -H=windowsgui" \
+        -o /out/pacefriend-client.exe ./cmd/pacefriend-client
+
+# Stage 2: Build Vue 3 + Tailwind CSS v4 frontend bundle
 FROM node:24-alpine AS frontend-builder
 WORKDIR /build
-COPY package.json package-lock.json* ./
+COPY backend/package.json backend/package-lock.json* ./
 RUN npm install --legacy-peer-deps
-COPY resources ./resources
-COPY public ./public
-COPY vite.config.js ./
+COPY backend/resources ./resources
+COPY backend/public ./public
+COPY backend/vite.config.js ./
 RUN npm run build
 
-# Stage 2: Production PHP 8.4-FPM + Nginx + Queue Worker
+# Stage 3: Production PHP 8.4-FPM + Nginx + Queue Worker
 FROM php:8.4-fpm-alpine
 
 RUN apk add --no-cache \
@@ -37,21 +47,23 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 
 # Install production Composer dependencies first for layer caching
-COPY composer.json composer.lock ./
+COPY backend/composer.json backend/composer.lock ./
 RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction
 
-# Copy application source and compiled Vite assets
-COPY . .
+# Copy application source, compiled Vite assets, and compiled Windows .exe
+COPY backend/ .
 COPY --from=frontend-builder /build/public/build ./public/build
+RUN mkdir -p ./public/downloads
+COPY --from=client-builder /out/pacefriend-client.exe ./public/downloads/pacefriend-client.exe
 
 RUN composer dump-autoload --optimize --no-dev \
     && chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
 
 # Production configuration files
-COPY docker/php.ini /usr/local/etc/php/conf.d/99-pacefriend.ini
-COPY docker/nginx.conf /etc/nginx/http.d/default.conf
-COPY docker/supervisord.conf /etc/supervisord.conf
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY backend/docker/php.ini /usr/local/etc/php/conf.d/99-pacefriend.ini
+COPY backend/docker/nginx.conf /etc/nginx/http.d/default.conf
+COPY backend/docker/supervisord.conf /etc/supervisord.conf
+COPY backend/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 80

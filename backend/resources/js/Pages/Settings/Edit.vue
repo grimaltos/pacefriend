@@ -7,6 +7,7 @@ const props = defineProps({
     profile: Object,
     tokens: Array,
     apiBaseUrl: String,
+    clientExeAvailable: Boolean,
 });
 
 const page = usePage();
@@ -179,15 +180,38 @@ function revoke(id) {
             </div>
         </div>
 
-        <!-- Sanctum Token Management for Go Client -->
+        <!-- Windows Client Download & Sanctum Token Management -->
         <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6">
-            <h2 class="text-lg font-semibold text-white mb-1">Conexión con <code class="text-emerald-400">pacefriend-client.exe</code></h2>
-            <p class="text-xs text-zinc-400 mb-5">Genera un token personal para autenticar el binario ultraligero de Go en tu PC de simulación.</p>
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 pb-6 border-b border-zinc-800">
+                <div>
+                    <h2 class="text-lg font-semibold text-white mb-1">App para Windows (<code class="text-emerald-400">pacefriend-client.exe</code>)</h2>
+                    <p class="text-xs text-zinc-400">
+                        Descarga el paquete ZIP listo para usar: ya incluye el ejecutable de bandeja de Windows y tu archivo <code class="text-zinc-200">pacefriend.json</code> preconfigurado con tu cuenta.
+                    </p>
+                </div>
+
+                <div v-if="clientExeAvailable" class="flex flex-wrap items-center gap-3 shrink-0">
+                    <a
+                        href="/settings/client-bundle"
+                        class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-sm transition shadow-lg shadow-emerald-500/10"
+                    >
+                        ⬇ Descargar PaceFriend Windows (.zip configurado)
+                    </a>
+                    <a
+                        href="/settings/client-exe"
+                        class="px-3.5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition"
+                    >
+                        Solo .exe
+                    </a>
+                </div>
+            </div>
+
+            <h3 class="text-sm font-semibold text-zinc-200 mb-3">Tokens de Dispositivos Vinculados</h3>
 
             <form @submit.prevent="generateToken" class="flex max-w-lg gap-2 mb-5">
                 <input v-model="tokenForm.token_name" type="text" required class="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3.5 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" />
-                <button type="submit" :disabled="tokenForm.processing" class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm cursor-pointer">
-                    Generar Token
+                <button type="submit" :disabled="tokenForm.processing" class="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-semibold text-xs cursor-pointer">
+                    Generar Token Manual
                 </button>
             </form>
 

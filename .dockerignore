@@ -1,0 +1,17 @@
+.git
+.env
+client/bin
+client/dist
+backend/node_modules
+backend/vendor
+backend/public/build
+backend/public/hot
+backend/public/downloads/*.exe
+backend/storage/logs/*.log
+backend/storage/framework/cache/data/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*.php
+backend/database/*.sqlite
+backend/.env
+backend/.phpunit.result.cache
+backend/tests

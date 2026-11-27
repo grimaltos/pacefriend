@@ -1,6 +1,7 @@
 # Go binaries & build artifacts
 client/bin/
 client/dist/
+backend/public/downloads/*.exe
 *.exe
 *.dll
 *.so

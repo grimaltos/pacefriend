@@ -110,7 +110,7 @@ func (u *Uploader) Start(ctx context.Context) {
 func (u *Uploader) Close() {
 	close(u.jobs)
 	u.wg.Wait()
-	u.notifySessionEnd()
+	u.NotifySessionEnd()
 }
 
 // SendHeartbeat notifies the PaceFriend web panel that the local Windows client is online
@@ -149,7 +149,8 @@ func (u *Uploader) SendHeartbeat(ctx context.Context, state string, trackName st
 	return nil
 }
 
-func (u *Uploader) notifySessionEnd() {
+// NotifySessionEnd informs the backend that the active 3D simulator session has closed.
+func (u *Uploader) NotifySessionEnd() {
 	if u.baseURL == "" {
 		return
 	}

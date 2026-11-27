@@ -19,6 +19,7 @@ type Config struct {
 	MinSamplesPerLap int
 	MaxLaps          int // Optional: stop automatically after N completed flying laps (useful in -sim)
 	Logger           *slog.Logger
+	OnMetadataChange func(telemetry.SessionMetadata)
 }
 
 // Runner coordinates the 20 Hz sampling ticker, zero-GC ring buffer, lap-crossing
@@ -87,6 +88,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	var frame telemetry.RawFrame
+	lastMeta := r.source.SessionMetadata()
+	metaCheckTick := 0
 
 	for {
 		select {
@@ -99,6 +102,14 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			if !ok {
 				continue
+			}
+			metaCheckTick++
+			if r.cfg.OnMetadataChange != nil && metaCheckTick >= r.cfg.SampleRateHz {
+				metaCheckTick = 0
+				if curMeta := r.source.SessionMetadata(); curMeta.TrackName != lastMeta.TrackName || curMeta.CarName != lastMeta.CarName {
+					lastMeta = curMeta
+					r.cfg.OnMetadataChange(curMeta)
+				}
 			}
 			if stop := r.ProcessFrame(now, &frame); stop {
 				return nil
@@ -211,6 +222,17 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 		AirTempC:      crossingFrame.AirTempC,
 		IsWet:         crossingFrame.IsWet,
 		SampleRateHz:  r.cfg.SampleRateHz,
+	}
+
+	if r.logger != nil {
+		r.logger.Info("flying lap completed",
+			slog.Int("lap", int(completed.LapNumber)),
+			slog.Uint64("lap_time_ms", uint64(completed.LapTimeMs)),
+			slog.Bool("is_clean", completed.IsClean),
+			slog.String("track", completed.TrackName),
+			slog.String("car", completed.CarName),
+			slog.Int("samples", len(batch.Samples)),
+		)
 	}
 
 	if r.uploader != nil {

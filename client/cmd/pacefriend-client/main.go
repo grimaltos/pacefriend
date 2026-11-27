@@ -248,10 +248,29 @@ func runLoop(
 
 		ring.Reset()
 		evaluator.ResetCursor()
-		runner := engine.NewRunner(cfg, source, ring, pool, evaluator, uploader)
+
+		sessionCfg := cfg
+		sessionCfg.OnMetadataChange = func(updated telemetry.SessionMetadata) {
+			logger.Info("session metadata updated",
+				slog.String("track", updated.TrackName),
+				slog.String("car", updated.CarName),
+			)
+			if updated.TrackName != "" {
+				trayMgr.SetStatus("En pista: " + updated.TrackName)
+			}
+			hbState.Store(heartbeatState{state: "in_session", trackName: updated.TrackName})
+			if hasConfig {
+				go func(track string) {
+					_ = uploader.SendHeartbeat(ctx, "in_session", track)
+				}(updated.TrackName)
+			}
+		}
+
+		runner := engine.NewRunner(sessionCfg, source, ring, pool, evaluator, uploader)
 
 		err := runner.Run(ctx)
 		_ = source.Close()
+		evaluator.SetPlan(nil)
 
 		if err == nil || simMode {
 			if err != nil {
@@ -260,9 +279,11 @@ func runLoop(
 			return
 		}
 
-		logger.Warn("telemetry stream interrupted, will retry connection", slog.Any("err", err))
+		logger.Info("iRacing 3D session ended or disconnected, waiting for next session", slog.Any("reason", err))
 		hbState.Store(heartbeatState{state: "waiting_iracing", trackName: ""})
 		if hasConfig {
+			uploader.NotifySessionEnd()
+			_ = uploader.SendHeartbeat(ctx, "waiting_iracing", "")
 			trayMgr.SetStatus("Conectado · Esperando pista iRacing...")
 		}
 		select {
@@ -271,6 +292,19 @@ func runLoop(
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// guiSafeLogWriter writes to the diagnostic file unconditionally first, and mirrors
+// to os.Stdout on a best-effort basis so -H=windowsgui invalid stdout handles never
+// abort file logging.
+type guiSafeLogWriter struct {
+	file *os.File
+}
+
+func (w *guiSafeLogWriter) Write(p []byte) (int, error) {
+	n, err := w.file.Write(p)
+	_, _ = os.Stdout.Write(p)
+	return n, err
 }
 
 func openDiagnosticLog(simMode bool) (io.Writer, *os.File) {
@@ -283,9 +317,9 @@ func openDiagnosticLog(simMode bool) (io.Writer, *os.File) {
 	}
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return os.Stdout, nil
+		return io.Discard, nil
 	}
-	return io.MultiWriter(os.Stdout, f), f
+	return &guiSafeLogWriter{file: f}, f
 }
 
 func firstNonEmpty(values ...string) string {

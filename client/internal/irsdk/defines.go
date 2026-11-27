@@ -26,11 +26,12 @@ const (
 )
 
 // Shared memory mapping names on Windows.
-// SpecShmName honors the PaceFriend technical specification ("Local\IRacingData"),
-// while OfficialShmName provides seamless compatibility with retail iRacing builds.
+// OfficialShmName matches IRSDK_MEMMAPFILENAME ("Local\IRSDKMemMapFileName") in irsdk_defines.h.
+// LegacyShmName and SpecShmName are kept as automatic fallbacks for custom/spec harnesses.
 const (
+	OfficialShmName = `Local\IRSDKMemMapFileName`
+	LegacyShmName   = `Local\IRacingMemMapFileName`
 	SpecShmName     = `Local\IRacingData`
-	OfficialShmName = `Local\IRacingMemMapFileName`
 )
 
 // VarType mirrors irsdk_VarType in irsdk_defines.h.
@@ -109,6 +110,36 @@ func ParseHeader(mem []byte, out *Header) error {
 		out.VarBuf[i].BufOffset = int32(binary.LittleEndian.Uint32(mem[base+4 : base+8]))
 	}
 	return nil
+}
+
+// RequiredMemorySize computes the exact byte span needed to address the header,
+// SessionInfo YAML block, variable descriptor table, and all rolling telemetry buffers.
+func RequiredMemorySize(hdr *Header) int {
+	maxEnd := HeaderSize
+	if hdr.SessionInfoOffset >= HeaderSize && hdr.SessionInfoLen > 0 {
+		if end := int(hdr.SessionInfoOffset) + int(hdr.SessionInfoLen); end > maxEnd {
+			maxEnd = end
+		}
+	}
+	if hdr.VarHeaderOffset >= HeaderSize && hdr.NumVars > 0 {
+		if end := int(hdr.VarHeaderOffset) + int(hdr.NumVars)*VarHeaderSize; end > maxEnd {
+			maxEnd = end
+		}
+	}
+	numBuf := int(hdr.NumBuf)
+	if numBuf > MaxBufs {
+		numBuf = MaxBufs
+	}
+	if hdr.BufLen > 0 {
+		for i := 0; i < numBuf; i++ {
+			if hdr.VarBuf[i].BufOffset >= HeaderSize {
+				if end := int(hdr.VarBuf[i].BufOffset) + int(hdr.BufLen); end > maxEnd {
+					maxEnd = end
+				}
+			}
+		}
+	}
+	return maxEnd
 }
 
 type varSlot struct {

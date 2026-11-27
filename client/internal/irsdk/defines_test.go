@@ -11,6 +11,10 @@ import (
 )
 
 func TestHeaderAndDynamicVarIndexing(t *testing.T) {
+	if OfficialShmName != `Local\IRSDKMemMapFileName` {
+		t.Fatalf("OfficialShmName must match IRSDK_MEMMAPFILENAME, got %q", OfficialShmName)
+	}
+
 	mem := buildSyntheticShmBlock(simSessionYAML)
 
 	var hdr Header
@@ -19,6 +23,9 @@ func TestHeaderAndDynamicVarIndexing(t *testing.T) {
 	}
 	if hdr.Ver != 2 || hdr.NumBuf != 3 || hdr.TickRate != 60 {
 		t.Fatalf("unexpected header values: %+v", hdr)
+	}
+	if req := RequiredMemorySize(&hdr); req != len(mem) {
+		t.Fatalf("RequiredMemorySize=%d, expected %d", req, len(mem))
 	}
 
 	idx, err := IndexVariables(mem, &hdr)

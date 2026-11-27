@@ -38,21 +38,22 @@ type memoryBasicInformation struct {
 // SharedMemorySource connects directly to iRacing's Windows shared memory mapping
 // via Win32 syscalls (OpenFileMappingW + MapViewOfFile) with zero CGO overhead.
 type SharedMemorySource struct {
-	preferredName   string
-	activeName      string
-	mappingHandle   syscall.Handle
-	viewAddr        uintptr
-	mem             []byte
-	varIndex        *VarIndex
-	lastSessionUpd  int32
-	lastNumVars     int32
-	lastVarHdrOff   int32
-	sessionMetadata telemetry.SessionMetadata
+	preferredName     string
+	activeName        string
+	mappingHandle     syscall.Handle
+	viewAddr          uintptr
+	mem               []byte
+	varIndex          *VarIndex
+	lastSessionUpd    int32
+	lastNumVars       int32
+	lastVarHdrOff     int32
+	disconnectedTicks int
+	sessionMetadata   telemetry.SessionMetadata
 }
 
 // NewSharedMemorySource creates a native Windows shared memory telemetry reader.
-// If shmName is empty, it tries Local\IRacingData first and falls back automatically
-// to Local\IRacingMemMapFileName.
+// If shmName is empty or matches one of the standard SDK names, it tries
+// Local\IRSDKMemMapFileName first and falls back automatically to legacy/spec names.
 func NewSharedMemorySource(shmName string) *SharedMemorySource {
 	return &SharedMemorySource{
 		preferredName:  shmName,
@@ -94,37 +95,41 @@ func (s *SharedMemorySource) Connect(_ context.Context) error {
 		return fmt.Errorf("MapViewOfFile(%s): %w", chosen, mapErr)
 	}
 
-	regionSize, err := queryMappedRegionSize(addr)
-	if err != nil || regionSize < HeaderSize {
-		_, _, _ = procUnmapViewOfFile.Call(addr)
-		_ = syscall.CloseHandle(handle)
-		return fmt.Errorf("VirtualQuery(%s): size=%d err=%w", chosen, regionSize, err)
-	}
-
 	s.mappingHandle = handle
 	s.viewAddr = addr
 	s.activeName = chosen
-	s.mem = unsafe.Slice((*byte)(unsafe.Pointer(addr)), regionSize)
 	s.lastSessionUpd = -1
+	s.disconnectedTicks = 0
 	s.varIndex = nil
 
-	// Perform initial header validation & variable offset indexing if already connected.
+	// Decode the 112-byte SDK header directly before relying on VirtualQuery page boundaries.
+	hdrBytes := unsafe.Slice((*byte)(unsafe.Pointer(addr)), HeaderSize)
 	var hdr Header
-	if err := ParseHeader(s.mem, &hdr); err != nil {
+	if err := ParseHeader(hdrBytes, &hdr); err != nil {
 		_ = s.Close()
 		return err
 	}
-	if hdr.NumVars > 0 && hdr.BufLen > 0 {
-		idx, err := IndexVariables(s.mem, &hdr)
-		if err != nil {
-			_ = s.Close()
-			return err
-		}
-		s.varIndex = idx
-		s.lastNumVars = hdr.NumVars
-		s.lastVarHdrOff = hdr.VarHeaderOffset
-		s.refreshSessionMetadataIfNeeded(&hdr)
+	if hdr.Status&StatusConnected == 0 || hdr.NumVars <= 0 || hdr.BufLen <= 0 {
+		_ = s.Close()
+		return ErrSimDisconnected
 	}
+
+	mappedSize := RequiredMemorySize(&hdr)
+	if regionSize, err := queryMappedRegionSize(addr); err == nil && regionSize > mappedSize {
+		mappedSize = regionSize
+	}
+
+	s.mem = unsafe.Slice((*byte)(unsafe.Pointer(addr)), mappedSize)
+
+	idx, err := IndexVariables(s.mem, &hdr)
+	if err != nil {
+		_ = s.Close()
+		return err
+	}
+	s.varIndex = idx
+	s.lastNumVars = hdr.NumVars
+	s.lastVarHdrOff = hdr.VarHeaderOffset
+	s.refreshSessionMetadataIfNeeded(&hdr)
 
 	return nil
 }
@@ -140,7 +145,18 @@ func (s *SharedMemorySource) ReadFrame(out *telemetry.RawFrame) (bool, error) {
 		return false, err
 	}
 	if hdr.Status&StatusConnected == 0 {
+		s.disconnectedTicks++
+		// After ~1s (20 ticks at 20 Hz) of disconnected status, release the handle so
+		// Windows can clean up the closed session mapping and wait for the next session.
+		if s.disconnectedTicks >= 20 {
+			return false, ErrSimDisconnected
+		}
 		return false, nil
+	}
+	s.disconnectedTicks = 0
+
+	if needed := RequiredMemorySize(&hdr); needed > len(s.mem) && s.viewAddr != 0 {
+		s.mem = unsafe.Slice((*byte)(unsafe.Pointer(s.viewAddr)), needed)
 	}
 
 	// Re-index dynamically if iRacing initialized or updated the variable table.
@@ -199,16 +215,14 @@ func (s *SharedMemorySource) refreshSessionMetadataIfNeeded(hdr *Header) {
 }
 
 func (s *SharedMemorySource) candidateNames() []string {
-	if s.preferredName != "" {
-		if s.preferredName == OfficialShmName {
-			return []string{OfficialShmName, SpecShmName}
-		}
-		if s.preferredName == SpecShmName {
-			return []string{OfficialShmName, SpecShmName}
-		}
-		return []string{s.preferredName}
+	defaults := []string{OfficialShmName, LegacyShmName, SpecShmName}
+	if s.preferredName == "" ||
+		s.preferredName == OfficialShmName ||
+		s.preferredName == LegacyShmName ||
+		s.preferredName == SpecShmName {
+		return defaults
 	}
-	return []string{OfficialShmName, SpecShmName}
+	return append([]string{s.preferredName}, defaults...)
 }
 
 func openFileMappingReadOnly(name string) (syscall.Handle, error) {

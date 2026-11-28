@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,13 +15,9 @@ import (
 
 	"github.com/pacefriend/client/internal/buffer"
 	"github.com/pacefriend/client/internal/coaching"
+	"github.com/pacefriend/client/internal/irsdk"
 	"github.com/pacefriend/client/internal/telemetry"
 )
-
-// AudioSettings carries live-synced audio preferences from the PaceFriend web panel.
-type AudioSettings struct {
-	Volume *int `json:"volume,omitempty"`
-}
 
 // LapResponse mirrors the JSON response returned by POST /api/v1/telemetry/lap.
 type LapResponse struct {
@@ -29,23 +26,44 @@ type LapResponse struct {
 	CleanLapsWindow int                `json:"clean_laps_window"`
 	CoachingPlan    *coaching.Plan     `json:"coaching_plan"`
 	RadioCallouts   []coaching.Callout `json:"radio_callouts,omitempty"`
-	AudioSettings   *AudioSettings     `json:"audio_settings,omitempty"`
+	PitCommands     []irsdk.PitCommand `json:"pit_commands,omitempty"`
 }
 
-// BriefingRequest is sent once upon entering track or when weather conditions shift.
+// BriefingRequest is sent once upon entering track or when session/weather conditions shift.
 type BriefingRequest struct {
-	TrackSlug     string    `json:"track_slug"`
-	TrackName     string    `json:"track_name,omitempty"`
-	TrackLengthKm float64   `json:"track_length_km,omitempty"`
-	CarName       string    `json:"car_name"`
-	SessionID     int       `json:"session_id,omitempty"`
-	SubSessionID  int       `json:"sub_session_id,omitempty"`
-	TrackTempC    float32   `json:"track_temp_c"`
-	AirTempC      float32   `json:"air_temp_c"`
-	IsWet         bool      `json:"is_wet"`
-	FuelLevelL    float32   `json:"fuel_level_l,omitempty"`
-	SectorSplits  []float32 `json:"sector_splits,omitempty"`
-	Reason        string    `json:"reason"`
+	TrackSlug     string                 `json:"track_slug"`
+	TrackName     string                 `json:"track_name,omitempty"`
+	TrackLengthKm float64                `json:"track_length_km,omitempty"`
+	CarName       string                 `json:"car_name"`
+	SessionID     int                    `json:"session_id,omitempty"`
+	SubSessionID  int                    `json:"sub_session_id,omitempty"`
+	TrackTempC    float32                `json:"track_temp_c"`
+	AirTempC      float32                `json:"air_temp_c"`
+	IsWet         bool                   `json:"is_wet"`
+	FuelLevelL    float32                `json:"fuel_level_l,omitempty"`
+	SectorSplits  []float32              `json:"sector_splits,omitempty"`
+	Reason        string                 `json:"reason"`
+	Race          *telemetry.RaceContext `json:"race_context,omitempty"`
+}
+
+// HazardAlertRequest notifies the engineer of an immediate spun/off-track car ahead.
+type HazardAlertRequest struct {
+	TrackSlug  string  `json:"track_slug"`
+	CarName    string  `json:"car_name"`
+	AheadMeters int    `json:"ahead_meters"`
+	LapDistPct float32 `json:"lap_dist_pct"`
+}
+
+// VoiceQueryRequest sends Push-To-Talk recorded driver speech + live race state to the engineer.
+type VoiceQueryRequest struct {
+	TrackSlug      string                 `json:"track_slug,omitempty"`
+	TrackName      string                 `json:"track_name,omitempty"`
+	TrackLengthKm  float64                `json:"track_length_km,omitempty"`
+	CarName        string                 `json:"car_name,omitempty"`
+	SessionID      int                    `json:"session_id,omitempty"`
+	SubSessionID   int                    `json:"sub_session_id,omitempty"`
+	AudioWAVBase64 string                 `json:"audio_wav_base64"`
+	Race           *telemetry.RaceContext `json:"race_context,omitempty"`
 }
 
 // PitStopRequest carries unlocked tyre pyrometer readings upon stopping in pits or garage.
@@ -59,8 +77,10 @@ type PitStopRequest struct {
 
 type genericRadioResponse struct {
 	Status        string             `json:"status"`
+	Transcript    string             `json:"transcript,omitempty"`
+	ReplyText     string             `json:"reply_text,omitempty"`
 	RadioCallouts []coaching.Callout `json:"radio_callouts,omitempty"`
-	AudioSettings *AudioSettings     `json:"audio_settings,omitempty"`
+	PitCommands   []irsdk.PitCommand `json:"pit_commands,omitempty"`
 }
 
 // Config configures the background HTTP uploader.
@@ -209,8 +229,41 @@ func (u *Uploader) TriggerRadioTest() {
 	}
 }
 
-// SendHeartbeat notifies the PaceFriend web panel that the local Windows client is online
-// and syncs live volume changes from the user's web settings.
+// EnqueueHazardAlert dispatches an immediate ahead-hazard warning request.
+func (u *Uploader) EnqueueHazardAlert(req HazardAlertRequest) {
+	if u.baseURL == "" || req.TrackSlug == "" {
+		return
+	}
+	select {
+	case u.events <- asyncEvent{endpoint: "/api/v1/telemetry/hazard", payload: req}:
+	default:
+	}
+}
+
+// SendVoiceQuery uploads Push-To-Talk WAV audio + live race context and immediately plays
+// the engineer's spoken reply and executes any returned iRacing Black Box pit commands.
+func (u *Uploader) SendVoiceQuery(ctx context.Context, wavBytes []byte, meta telemetry.SessionMetadata, rc telemetry.RaceContext) {
+	if u.baseURL == "" || len(wavBytes) == 0 {
+		return
+	}
+	payload := VoiceQueryRequest{
+		TrackSlug:      meta.TrackSlug,
+		TrackName:      meta.TrackName,
+		TrackLengthKm:  meta.TrackLengthKm,
+		CarName:        meta.CarName,
+		SessionID:      meta.SessionID,
+		SubSessionID:   meta.SubSessionID,
+		AudioWAVBase64: base64.StdEncoding.EncodeToString(wavBytes),
+		Race:           &rc,
+	}
+	u.processAsyncEvent(ctx, asyncEvent{
+		endpoint: "/api/v1/telemetry/voice-query",
+		payload:  payload,
+	})
+}
+
+// SendHeartbeat notifies the PaceFriend web panel that the local Windows client is online.
+// Note: Radio volume is controlled exclusively by the local .exe and never overwritten by heartbeat.
 func (u *Uploader) SendHeartbeat(ctx context.Context, state string, trackName string) error {
 	if u.baseURL == "" {
 		return fmt.Errorf("missing api_url (check pacefriend.json)")
@@ -242,11 +295,7 @@ func (u *Uploader) SendHeartbeat(ctx context.Context, state string, trackName st
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("heartbeat HTTP %d", resp.StatusCode)
 	}
-
-	var parsed genericRadioResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&parsed); err == nil {
-		u.applyAudioSettings(parsed.AudioSettings)
-	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8192))
 	return nil
 }
 
@@ -352,7 +401,7 @@ func (u *Uploader) processAsyncEvent(ctx context.Context, ev asyncEvent) {
 		return
 	}
 
-	u.applyAudioSettings(parsed.AudioSettings)
+	u.executePitCommands(parsed.PitCommands)
 	u.dispatchRadioCallouts(ctx, parsed.RadioCallouts)
 }
 
@@ -456,7 +505,7 @@ func (u *Uploader) processJob(ctx context.Context, job uploadJob) {
 		return
 	}
 
-	u.applyAudioSettings(parsed.AudioSettings)
+	u.executePitCommands(parsed.PitCommands)
 	u.dispatchRadioCallouts(ctx, parsed.RadioCallouts)
 
 	if parsed.CoachingPlan != nil {
@@ -478,13 +527,17 @@ func (u *Uploader) processJob(ctx context.Context, job uploadJob) {
 	}
 }
 
-func (u *Uploader) applyAudioSettings(settings *AudioSettings) {
-	if settings == nil || settings.Volume == nil {
+func (u *Uploader) executePitCommands(cmds []irsdk.PitCommand) {
+	if len(cmds) == 0 {
 		return
 	}
-	if imm, ok := u.speaker.(coaching.ImmediateSpeaker); ok {
-		imm.SetVolume(*settings.Volume)
-	}
+	go func() {
+		if err := irsdk.ExecutePitCommands(cmds); err != nil && u.logger != nil {
+			u.logger.Warn("pit command broadcast failed", slog.Any("err", err))
+		} else if u.logger != nil {
+			u.logger.Info("executed iRacing pit commands", slog.Int("count", len(cmds)))
+		}
+	}()
 }
 
 func (u *Uploader) dispatchRadioCallouts(ctx context.Context, callouts []coaching.Callout) {

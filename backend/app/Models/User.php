@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\HasApiTokens;
 
@@ -111,9 +112,13 @@ class User extends Authenticatable
             $sectorMode = 'improvements';
         }
 
+        $pitMode = (string) ($prefs['pit_automation_mode'] ?? 'confirm');
+        if (! in_array($pitMode, ['confirm', 'auto', 'manual_voice'], true)) {
+            $pitMode = 'confirm';
+        }
+
         return [
             'voice_id' => $voice,
-            'volume' => max(0, min(100, (int) ($prefs['radio_volume'] ?? 85))),
             'radio_beep' => (bool) ($prefs['radio_beep'] ?? true),
             'pit_wall_fx' => (bool) ($prefs['pit_wall_fx'] ?? true),
             'finish_callout_mode' => $finishMode,
@@ -121,7 +126,33 @@ class User extends Authenticatable
             'min_clean_laps' => max(2, min(5, (int) ($prefs['min_clean_laps'] ?? config('pacefriend.min_chronic_occurrences', 3)))),
             'fuel_alerts' => (bool) ($prefs['fuel_alerts'] ?? true),
             'tyre_temp_alerts' => (bool) ($prefs['tyre_temp_alerts'] ?? true),
+            'pit_automation_mode' => $pitMode,
+            'crewchief_coexistence' => (bool) ($prefs['crewchief_coexistence'] ?? true),
+            'groq_configured' => $this->resolveGroqApiKey() !== null,
+            'has_user_groq_key' => ! empty($prefs['groq_api_key_enc']),
         ];
+    }
+
+    /**
+     * Resolve the active Groq API key (user-configured encrypted key or global server .env key).
+     */
+    public function resolveGroqApiKey(): ?string
+    {
+        $prefs = $this->preferences ?? [];
+        if (! empty($prefs['groq_api_key_enc'])) {
+            try {
+                $dec = trim(Crypt::decryptString((string) $prefs['groq_api_key_enc']));
+                if ($dec !== '') {
+                    return $dec;
+                }
+            } catch (\Throwable) {
+                // Fall back to server key if APP_KEY rotated
+            }
+        }
+
+        $envKey = trim((string) config('pacefriend.groq.api_key', ''));
+
+        return $envKey !== '' ? $envKey : null;
     }
 
     public function referenceLaps(): HasMany

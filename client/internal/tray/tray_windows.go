@@ -3,6 +3,7 @@
 package tray
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ const (
 
 	mfString    = 0x00000000
 	mfChecked   = 0x00000008
+	mfPopup     = 0x00000010
 	mfGrayed    = 0x00000001
 	mfSeparator = 0x00000800
 
@@ -45,6 +47,8 @@ const (
 	cmdOpenPanel  = 1002
 	cmdExitApp    = 1003
 	cmdTestRadio  = 1004
+	cmdBindPTT    = 1005
+	cmdVolBase    = 1100 // 1100 + pct (e.g. 1200 = 100%, 1185 = 85%, ...)
 )
 
 var (
@@ -269,8 +273,44 @@ func (m *Manager) showContextMenu(hwnd uintptr) {
 	appendMenuItem(hMenu, mfString|mfGrayed, 0, "PaceFriend · "+status)
 	_, _, _ = procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
 
-	if m.opts.OnTestRadio != nil {
-		appendMenuItem(hMenu, mfString, cmdTestRadio, "Probar Radio del Ingeniero")
+	// Local .exe Volume Submenu
+	if m.opts.GetVolume != nil && m.opts.OnSetVolume != nil {
+		curVol := m.opts.GetVolume()
+		hVolMenu, _, _ := procCreatePopupMenu.Call()
+		if hVolMenu != 0 {
+			levels := []struct {
+				pct   int
+				label string
+			}{
+				{100, "100% (Máximo)"},
+				{85, "85% (Alto)"},
+				{70, "70% (Medio-Alto)"},
+				{55, "55% (Medio)"},
+				{40, "40% (Suave)"},
+				{25, "25% (Bajo)"},
+				{10, "10% (Mínimo)"},
+			}
+			closestIdx := 0
+			closestDiff := 999
+			for idx, lv := range levels {
+				d := curVol - lv.pct
+				if d < 0 {
+					d = -d
+				}
+				if d < closestDiff {
+					closestDiff = d
+					closestIdx = idx
+				}
+			}
+			for idx, lv := range levels {
+				fl := uintptr(mfString)
+				if idx == closestIdx {
+					fl |= mfChecked
+				}
+				appendMenuItem(hVolMenu, fl, uintptr(cmdVolBase+lv.pct), lv.label)
+			}
+			appendMenuItem(hMenu, mfPopup, hVolMenu, fmt.Sprintf("Volumen de Radio (%d%%)", curVol))
+		}
 	}
 
 	muteFlags := uintptr(mfString)
@@ -278,6 +318,14 @@ func (m *Manager) showContextMenu(hwnd uintptr) {
 		muteFlags |= mfChecked
 	}
 	appendMenuItem(hMenu, muteFlags, cmdToggleMute, "Silenciar Radio")
+
+	if m.opts.GetPTTLabel != nil && m.opts.OnBindPTT != nil {
+		appendMenuItem(hMenu, mfString, cmdBindPTT, "Hablar al Ingeniero (PTT): "+m.opts.GetPTTLabel()+" [Cambiar]")
+	}
+
+	if m.opts.OnTestRadio != nil {
+		appendMenuItem(hMenu, mfString, cmdTestRadio, "Probar Radio del Ingeniero")
+	}
 
 	if m.opts.PanelURL != "" {
 		appendMenuItem(hMenu, mfString, cmdOpenPanel, "Abrir Panel Web")
@@ -301,7 +349,18 @@ func (m *Manager) showContextMenu(hwnd uintptr) {
 	)
 	_, _, _ = procPostMessageW.Call(hwnd, wmNull, 0, 0)
 
+	if cmd >= cmdVolBase && cmd <= cmdVolBase+100 {
+		if m.opts.OnSetVolume != nil {
+			m.opts.OnSetVolume(int(cmd - cmdVolBase))
+		}
+		return
+	}
+
 	switch cmd {
+	case cmdBindPTT:
+		if m.opts.OnBindPTT != nil {
+			m.opts.OnBindPTT()
+		}
 	case cmdTestRadio:
 		if m.opts.OnTestRadio != nil {
 			m.opts.OnTestRadio()

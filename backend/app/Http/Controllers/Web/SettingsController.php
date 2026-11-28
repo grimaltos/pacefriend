@@ -9,6 +9,7 @@ use App\Services\Garage61\Garage61OAuthService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Crypt;
 use Inertia\Inertia;
 use Inertia\Response;
 use RuntimeException;
@@ -101,7 +102,6 @@ class SettingsController extends Controller
 
         $validated = $request->validate([
             'voice_id' => ['required', 'string', "in:{$allowedVoices}"],
-            'volume' => ['required', 'integer', 'min:0', 'max:100'],
             'radio_beep' => ['required', 'boolean'],
             'pit_wall_fx' => ['required', 'boolean'],
             'finish_callout_mode' => ['required', 'in:full,improvements,off'],
@@ -109,12 +109,15 @@ class SettingsController extends Controller
             'min_clean_laps' => ['required', 'integer', 'min:2', 'max:5'],
             'fuel_alerts' => ['required', 'boolean'],
             'tyre_temp_alerts' => ['required', 'boolean'],
+            'pit_automation_mode' => ['nullable', 'in:confirm,auto,manual_voice'],
+            'crewchief_coexistence' => ['nullable', 'boolean'],
+            'groq_api_key' => ['nullable', 'string', 'max:240'],
+            'clear_groq_key' => ['nullable', 'boolean'],
         ]);
 
         $user = $request->user();
         $prefs = $user->preferences ?? [];
         $prefs['radio_voice_id'] = $validated['voice_id'];
-        $prefs['radio_volume'] = (int) $validated['volume'];
         $prefs['radio_beep'] = (bool) $validated['radio_beep'];
         $prefs['pit_wall_fx'] = (bool) $validated['pit_wall_fx'];
         $prefs['finish_callout_mode'] = $validated['finish_callout_mode'];
@@ -122,10 +125,20 @@ class SettingsController extends Controller
         $prefs['min_clean_laps'] = (int) $validated['min_clean_laps'];
         $prefs['fuel_alerts'] = (bool) $validated['fuel_alerts'];
         $prefs['tyre_temp_alerts'] = (bool) $validated['tyre_temp_alerts'];
+        $prefs['pit_automation_mode'] = $validated['pit_automation_mode'] ?? ($prefs['pit_automation_mode'] ?? 'confirm');
+        $prefs['crewchief_coexistence'] = array_key_exists('crewchief_coexistence', $validated)
+            ? (bool) $validated['crewchief_coexistence']
+            : (bool) ($prefs['crewchief_coexistence'] ?? true);
+
+        if (! empty($validated['clear_groq_key'])) {
+            unset($prefs['groq_api_key_enc']);
+        } elseif (! empty(trim((string) ($validated['groq_api_key'] ?? '')))) {
+            $prefs['groq_api_key_enc'] = Crypt::encryptString(trim((string) $validated['groq_api_key']));
+        }
 
         $user->forceFill(['preferences' => $prefs])->save();
 
-        return back()->with('success', 'Ajustes de voz, efectos de radio y avisos en pista actualizados.');
+        return back()->with('success', 'Ajustes de voz, modo carrera y automatización de box actualizados.');
     }
 
     public function previewRadio(Request $request, RadioEngineerService $radioEngineer): JsonResponse
@@ -138,7 +151,6 @@ class SettingsController extends Controller
 
         $validated = $request->validate([
             'voice_id' => ['required', 'string', "in:{$allowedVoices}"],
-            'volume' => ['required', 'integer', 'min:0', 'max:100'],
             'radio_beep' => ['required', 'boolean'],
             'pit_wall_fx' => ['required', 'boolean'],
         ]);
@@ -243,6 +255,7 @@ class SettingsController extends Controller
         $configJson = json_encode([
             'api_url' => url('/'),
             'api_token' => $token->plainTextToken,
+            'volume' => 85,
             'mute' => false,
         ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
@@ -257,6 +270,7 @@ class SettingsController extends Controller
             '1. Extrae esta carpeta "PaceFriend" completa donde prefieras (ej. Escritorio o Documentos).',
             '2. Mantén juntos "pacefriend-client.exe" y "pacefriend.json" en la misma carpeta.',
             '3. Haz doble clic en "pacefriend-client.exe": aparecerá el icono junto al reloj de Windows.',
+            '4. Clic derecho en el icono de PaceFriend para ajustar el VOLUMEN DE RADIO y asignar el BOTÓN PTT de tu volante.',
             '   (Si Windows SmartScreen pregunta la primera vez, pulsa "Más información" -> "Ejecutar de todas formas").',
             '',
         ]);

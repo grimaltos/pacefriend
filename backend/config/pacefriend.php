@@ -68,6 +68,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Natural Voice Push-To-Talk Race Engineer (Groq Whisper + Llama 3.3 + Local Hybrid)
+    |--------------------------------------------------------------------------
+    */
+    'groq' => [
+        'api_key' => env('GROQ_API_KEY'),
+        'base_url' => env('GROQ_API_URL', 'https://api.groq.com/openai/v1'),
+        'stt_model' => env('GROQ_STT_MODEL', 'whisper-large-v3-turbo'),
+        'chat_model' => env('GROQ_CHAT_MODEL', 'llama-3.3-70b-versatile'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Garage 61 Developer API & Progressive Autopilot
     |--------------------------------------------------------------------------
     */

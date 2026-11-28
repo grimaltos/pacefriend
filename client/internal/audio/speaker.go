@@ -43,7 +43,8 @@ type cachedClip struct {
 // Config configures the RAM-preloaded local voice playback engine.
 type Config struct {
 	Muted      bool
-	Volume     int // 0..100 (default 85 if <= 0 and not explicitly 0)
+	Volume     int // 0..100 (default 85 if !VolumeSet and Volume <= 0)
+	VolumeSet  bool
 	APIToken   string
 	HTTPClient *http.Client
 	Logger     *slog.Logger
@@ -79,10 +80,12 @@ func NewEngine(cfg Config) *Engine {
 	_ = os.MkdirAll(stageDir, 0o700)
 
 	initialVol := cfg.Volume
-	if initialVol <= 0 {
+	if !cfg.VolumeSet && initialVol <= 0 {
 		initialVol = 85
 	}
-	if initialVol > 100 {
+	if initialVol < 0 {
+		initialVol = 0
+	} else if initialVol > 100 {
 		initialVol = 100
 	}
 
@@ -135,6 +138,33 @@ func (e *Engine) SetVolume(pct int) {
 // Volume returns the current independent radio volume percentage (0..100).
 func (e *Engine) Volume() int {
 	return int(e.volumePct.Load())
+}
+
+// PlayInlineWAV registers an in-memory WAV buffer (such as a PTT click or volume preview tone)
+// and enqueues it on the background audio worker scaled to the local .exe volume.
+func (e *Engine) PlayInlineWAV(id string, wav []byte) {
+	if len(wav) <= 44 {
+		return
+	}
+	memURL := "memory://" + id
+	key := clipKey(coaching.Trigger{AudioURL: memURL})
+
+	e.mu.Lock()
+	if _, exists := e.clips[key]; !exists {
+		e.clips[key] = cachedClip{
+			key:    key,
+			format: formatWAV,
+			data:   wav,
+		}
+	}
+	e.mu.Unlock()
+
+	e.Speak(coaching.Trigger{
+		ID:       id,
+		Phase:    coaching.Phase("ptt_tone"),
+		AudioURL: memURL,
+		Text:     id,
+	})
 }
 
 // CachedCount returns the number of voice clips currently resident in RAM.

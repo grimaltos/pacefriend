@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/pacefriend/client/internal/config"
 	"github.com/pacefriend/client/internal/engine"
 	"github.com/pacefriend/client/internal/irsdk"
+	"github.com/pacefriend/client/internal/ptt"
 	"github.com/pacefriend/client/internal/telemetry"
 	"github.com/pacefriend/client/internal/transport"
 	"github.com/pacefriend/client/internal/tray"
@@ -27,6 +29,11 @@ import (
 type heartbeatState struct {
 	state     string
 	trackName string
+}
+
+type liveRaceSnapshot struct {
+	meta telemetry.SessionMetadata
+	rc   telemetry.RaceContext
 }
 
 func main() {
@@ -62,9 +69,11 @@ func main() {
 	pool := buffer.NewSnapshotPool(4096)
 	ring := buffer.NewRingBuffer(buffer.DefaultCapacity)
 	speaker := audio.NewEngine(audio.Config{
-		Muted:    *muteAudio,
-		APIToken: *apiToken,
-		Logger:   logger,
+		Muted:     *muteAudio,
+		Volume:    fileCfg.EffectiveVolume(),
+		VolumeSet: true,
+		APIToken:  *apiToken,
+		Logger:    logger,
 	})
 	defer speaker.Close()
 	evaluator := coaching.NewEvaluator(speaker)
@@ -82,7 +91,28 @@ func main() {
 	uploader.Start(ctx)
 	defer uploader.Close()
 
+	var liveSnap atomic.Value
+	liveSnap.Store(liveRaceSnapshot{
+		rc: telemetry.RaceContext{SessionType: "practice"},
+	})
+
+	volCheckBeep := ptt.SynthesizeToneWAV(940, 75, 0.32)
+	pttListener := ptt.NewListener(
+		fileCfg.EffectivePTT(),
+		func(recCtx context.Context, wavBytes []byte) {
+			snap, _ := liveSnap.Load().(liveRaceSnapshot)
+			uploader.SendVoiceQuery(recCtx, wavBytes, snap.meta, snap.rc)
+		},
+		func(tone []byte) {
+			speaker.PlayInlineWAV(fmt.Sprintf("ptt_%d", time.Now().UnixNano()), tone)
+		},
+		logger,
+	)
+
 	var trayMgr *tray.Manager
+	var lastNormalStatus atomic.Value
+	lastNormalStatus.Store(initialTrayStatus)
+
 	if !*noTray && !*simMode {
 		var testRadioCb func()
 		if *apiURL != "" && *apiToken != "" {
@@ -91,14 +121,53 @@ func main() {
 		trayMgr = tray.Start(tray.Options{
 			InitialStatus: initialTrayStatus,
 			PanelURL:      *apiURL,
-			IsMuted:       speaker.IsMuted,
+			GetVolume:     speaker.Volume,
+			OnSetVolume: func(pct int) {
+				speaker.SetVolume(pct)
+				speaker.SetMuted(false)
+				_ = config.SaveAdjacent(func(fc *config.FileConfig) {
+					v := pct
+					fc.Volume = &v
+					fc.Mute = false
+				})
+				speaker.PlayInlineWAV("vol_preview", volCheckBeep)
+			},
+			GetPTTLabel: func() string {
+				return pttListener.Binding().Label
+			},
+			OnBindPTT: func() {
+				if trayMgr != nil {
+					trayMgr.SetStatus("Pulsa botón de volante o tecla (10s)...")
+				}
+				pttListener.LearnBindingAsync(ctx, func(b config.PTTConfig, ok bool) {
+					if ok {
+						_ = config.SaveAdjacent(func(fc *config.FileConfig) {
+							fc.PTT = b
+						})
+						logger.Info("updated Push-To-Talk binding", slog.String("label", b.Label))
+					}
+					if trayMgr != nil {
+						prev, _ := lastNormalStatus.Load().(string)
+						trayMgr.SetStatus(prev)
+					}
+				})
+			},
+			IsMuted: speaker.IsMuted,
 			OnToggleMute: func() {
-				speaker.SetMuted(!speaker.IsMuted())
+				next := !speaker.IsMuted()
+				speaker.SetMuted(next)
+				_ = config.SaveAdjacent(func(fc *config.FileConfig) {
+					fc.Mute = next
+				})
 			},
 			OnTestRadio: testRadioCb,
 			OnExit:      stop,
 		})
 		defer trayMgr.Close()
+	}
+
+	if !*simMode && *apiURL != "" && *apiToken != "" {
+		go pttListener.Run(ctx)
 	}
 
 	if *simMode && *demoPlan && *apiURL == "" {
@@ -157,7 +226,7 @@ func main() {
 	}
 	defer source.Close()
 
-	runLoop(ctx, logger, source, ring, pool, evaluator, uploader, trayMgr, &hbState, engine.Config{
+	runLoop(ctx, logger, source, ring, pool, evaluator, uploader, trayMgr, &hbState, &lastNormalStatus, &liveSnap, engine.Config{
 		UserID:       *userID,
 		SampleRateHz: *rateHz,
 		MaxLaps:      *simLaps,
@@ -206,10 +275,16 @@ func runLoop(
 	uploader *transport.Uploader,
 	trayMgr *tray.Manager,
 	hbState *atomic.Value,
+	lastNormalStatus *atomic.Value,
+	liveSnap *atomic.Value,
 	cfg engine.Config,
 	simMode bool,
 	hasConfig bool,
 ) {
+	setTray := func(s string) {
+		lastNormalStatus.Store(s)
+		trayMgr.SetStatus(s)
+	}
 	loggedWait := false
 
 	for ctx.Err() == nil {
@@ -221,7 +296,7 @@ func runLoop(
 			if !loggedWait {
 				logger.Info("waiting for iRacing 3D simulator session in shared memory...", slog.Any("detail", err))
 				if hasConfig {
-					trayMgr.SetStatus("Conectado · Esperando pista iRacing...")
+					setTray("Conectado · Esperando pista iRacing...")
 				}
 				hbState.Store(heartbeatState{state: "waiting_iracing", trackName: ""})
 				loggedWait = true
@@ -242,11 +317,12 @@ func runLoop(
 		)
 
 		if meta.TrackName != "" {
-			trayMgr.SetStatus("En pista: " + meta.TrackName)
+			setTray("En pista: " + meta.TrackName)
 		} else {
-			trayMgr.SetStatus("iRacing detectado (cargando sesión)")
+			setTray("iRacing detectado (cargando sesión)")
 		}
 		hbState.Store(heartbeatState{state: "in_session", trackName: meta.TrackName})
+		liveSnap.Store(liveRaceSnapshot{meta: meta, rc: telemetry.RaceContext{SessionType: meta.SessionTypeFor(0)}})
 		if hasConfig {
 			_ = uploader.SendHeartbeat(ctx, "in_session", meta.TrackName)
 		}
@@ -261,7 +337,7 @@ func runLoop(
 				slog.String("car", updated.CarName),
 			)
 			if updated.TrackName != "" {
-				trayMgr.SetStatus("En pista: " + updated.TrackName)
+				setTray("En pista: " + updated.TrackName)
 			}
 			hbState.Store(heartbeatState{state: "in_session", trackName: updated.TrackName})
 			if hasConfig {
@@ -269,6 +345,9 @@ func runLoop(
 					_ = uploader.SendHeartbeat(ctx, "in_session", track)
 				}(updated.TrackName)
 			}
+		}
+		sessionCfg.OnLiveState = func(curMeta telemetry.SessionMetadata, curRC telemetry.RaceContext) {
+			liveSnap.Store(liveRaceSnapshot{meta: curMeta, rc: curRC})
 		}
 
 		runner := engine.NewRunner(sessionCfg, source, ring, pool, evaluator, uploader)
@@ -289,7 +368,7 @@ func runLoop(
 		if hasConfig {
 			uploader.NotifySessionEnd()
 			_ = uploader.SendHeartbeat(ctx, "waiting_iracing", "")
-			trayMgr.SetStatus("Conectado · Esperando pista iRacing...")
+			setTray("Conectado · Esperando pista iRacing...")
 		}
 		select {
 		case <-ctx.Done():

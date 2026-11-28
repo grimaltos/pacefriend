@@ -9,6 +9,7 @@ use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -155,27 +156,27 @@ class PaceFriendPipelineTest extends TestCase
             'driver_callsign' => 'Vicent',
         ]);
 
-        // 1. Configure Ximena neural voice, 70% volume, 2 clean laps threshold
+        // 1. Configure Ximena neural voice, confirm pit mode, 2 clean laps threshold (volume is .exe-only!)
         $this->actingAs($user)->put('/settings/radio', [
             'voice_id' => 'es-ES-XimenaNeural',
-            'volume' => 70,
             'radio_beep' => true,
             'pit_wall_fx' => true,
             'finish_callout_mode' => 'full',
             'min_clean_laps' => 2,
             'fuel_alerts' => true,
             'tyre_temp_alerts' => true,
+            'pit_automation_mode' => 'confirm',
+            'crewchief_coexistence' => true,
         ])->assertRedirect();
 
         $user->refresh();
         $this->assertSame('es-ES-XimenaNeural', $user->radioSettings()['voice_id']);
-        $this->assertSame(70, $user->radioSettings()['volume']);
+        $this->assertSame('confirm', $user->radioSettings()['pit_automation_mode']);
         $this->assertSame(2, $user->radioSettings()['min_clean_laps']);
 
         // 2. Preview radio clip & verify content-addressed SHA-256 matches served bytes
         $previewResp = $this->actingAs($user)->postJson('/settings/radio/preview', [
             'voice_id' => 'es-ES-XimenaNeural',
-            'volume' => 70,
             'radio_beep' => true,
             'pit_wall_fx' => true,
         ]);
@@ -208,7 +209,7 @@ class PaceFriendPipelineTest extends TestCase
                 'reason' => 'session_start',
             ]);
         $briefResp->assertOk();
-        $this->assertSame(70, $briefResp->json('audio_settings.volume'));
+        $this->assertNull($briefResp->json('audio_settings'), 'Volume is controlled strictly by the local Windows .exe');
         $briefText = $briefResp->json('radio_callouts.0.text');
         $this->assertStringContainsString('Buenas Vicent', $briefText);
         $this->assertStringContainsString('36 litros más que el target', $briefText);
@@ -595,6 +596,166 @@ class PaceFriendPipelineTest extends TestCase
         $this->assertSame('under_driving_grip', $gripPlan['primary_issue']);
         $this->assertStringContainsString('Vicent,', $gripPlan['triggers'][0]['text']);
         $this->assertStringContainsString('margen de goma', $gripPlan['triggers'][0]['text']);
+    }
+
+    public function test_race_mode_qualy_fuel_alarm_wet_crossover_confirmation_and_groq_voice_pit_commands(): void
+    {
+        Http::fake([
+            'https://api.groq.com/openai/v1/audio/transcriptions' => Http::response([
+                'text' => 'Sí confirma prepáralo',
+            ], 200),
+            'https://api.groq.com/openai/v1/chat/completions' => Http::response([
+                'choices' => [[
+                    'message' => [
+                        'content' => json_encode([
+                            'reply_text' => 'Oído Vicent: ruedas desmarcadas y 18 litros listos en el box.',
+                            'pit_commands' => [
+                                ['action' => 'clear_tires', 'value' => 0],
+                                ['action' => 'fuel', 'value' => 18],
+                            ],
+                        ], JSON_UNESCAPED_UNICODE),
+                    ],
+                ]],
+            ], 200),
+        ]);
+
+        $user = User::factory()->create([
+            'name' => 'Vicent Grimaltos',
+            'driver_callsign' => 'Vicent',
+        ]);
+
+        // Save encrypted Groq API key & default 'confirm' pit automation mode
+        $this->actingAs($user)->put('/settings/radio', [
+            'voice_id' => 'es-ES-AlvaroNeural',
+            'radio_beep' => true,
+            'pit_wall_fx' => true,
+            'finish_callout_mode' => 'full',
+            'min_clean_laps' => 2,
+            'fuel_alerts' => true,
+            'tyre_temp_alerts' => true,
+            'pit_automation_mode' => 'confirm',
+            'crewchief_coexistence' => true,
+            'groq_api_key' => 'gsk_test_free_key_12345',
+        ])->assertRedirect();
+
+        $user->refresh();
+        $this->assertSame('gsk_test_free_key_12345', $user->resolveGroqApiKey());
+
+        $token = $user->createToken('RaceRig')->plainTextToken;
+
+        // 1. Race Grid Briefing: Driver enters a 12-lap Sprint Race at Spa with only 9.5L (Qualy setup mistake!)
+        $gridBrief = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/briefing', [
+                'track_slug' => 'spa-up',
+                'track_name' => 'Circuit de Spa-Francorchamps',
+                'track_length_km' => 7.004,
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 70001,
+                'sub_session_id' => 70002,
+                'track_temp_c' => 24.0,
+                'air_temp_c' => 18.0,
+                'is_wet' => false,
+                'fuel_level_l' => 9.5,
+                'reason' => 'session_start',
+                'race_context' => [
+                    'session_type' => 'race',
+                    'class_position' => 4,
+                    'laps_remain' => 12,
+                    'incident_limit' => 17,
+                ],
+            ]);
+        $gridBrief->assertOk();
+        $gridText = $gridBrief->json('radio_callouts.0.text');
+        $this->assertStringContainsString('Sales P4', $gridText);
+        $this->assertStringContainsString('setup de qualy', $gridText);
+
+        // 2. Rain arrives & Wet cars are 2.6s faster -> Crossover detected!
+        // Because pit_automation_mode = 'confirm', engineer RECOMMENDS & awaits confirmation (pit_commands = [])
+        $lapResp = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/lap', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'session_id' => 70001,
+                'sub_session_id' => 70002,
+                'lap_number' => 1,
+                'lap_time_ms' => 143800,
+                'is_clean' => true,
+                'track_temp_c' => 21.0,
+                'air_temp_c' => 16.0,
+                'is_wet' => true,
+                'fuel_level_l' => 6.0,
+                'fuel_used_l' => 3.0,
+                'race_context' => [
+                    'session_type' => 'race',
+                    'class_position' => 4,
+                    'laps_remain' => 6,
+                    'fuel_level_l' => 6.0,
+                    'player_compound' => 0, // Still on Dry slicks!
+                    'precipitation' => 0.45,
+                    'track_wetness_level' => 3,
+                    'weather_declared_wet' => true,
+                    'dry_cars_count' => 8,
+                    'dry_cars_avg_lap_ms' => 143800,
+                    'wet_cars_count' => 4,
+                    'wet_cars_avg_lap_ms' => 141200, // 2.6s faster on wets!
+                    'incident_count' => 15,
+                    'incident_limit' => 17,
+                ],
+                'samples' => $this->buildDriverEarlyBrakingSamples(143800),
+            ]);
+        $lapResp->assertCreated();
+        $this->assertEmpty($lapResp->json('pit_commands'), 'In confirm mode, pit_commands must wait for voice confirmation');
+        $lapText = $lapResp->json('radio_callouts.0.text');
+        $this->assertStringContainsString('Crossover de lluvia', $lapText);
+        $this->assertStringContainsString('¿Confirmas?', $lapText);
+        $this->assertStringContainsString('15 incidentes de 17', $lapText);
+
+        // 3. Driver presses steering-wheel PTT button -> Groq Whisper transcribes "Sí confirma prepáralo"
+        // -> Engineer immediately dispatches compound=1 (wet), all_tires, and exact refuel liters!
+        $fakeWav = base64_encode('RIFF'.str_repeat("\0", 80));
+        $confirmResp = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/voice-query', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'audio_wav_base64' => $fakeWav,
+                'race_context' => [
+                    'session_type' => 'race',
+                    'laps_remain' => 6,
+                    'fuel_level_l' => 6.0,
+                ],
+            ]);
+        $confirmResp->assertOk();
+        $this->assertStringContainsString('Confirmado Vicent', $confirmResp->json('reply_text'));
+        $pitCmds = $confirmResp->json('pit_commands');
+        $this->assertCount(3, $pitCmds);
+        $this->assertSame('compound', $pitCmds[0]['action']);
+        $this->assertSame(1, $pitCmds[0]['value']);
+        $this->assertSame('all_tires', $pitCmds[1]['action']);
+        $this->assertSame('fuel', $pitCmds[2]['action']);
+        $this->assertGreaterThanOrEqual(12, $pitCmds[2]['value']);
+
+        // 4. Direct natural order via Groq Llama 3.3 ("No me cambies ruedas y ponme 18 litros")
+        $directOrder = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/voice-query', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'transcript' => 'Oye, en la parada no me cambies ruedas y ponme 18 litros',
+                'race_context' => ['session_type' => 'race', 'laps_remain' => 6, 'fuel_level_l' => 4.0],
+            ]);
+        $directOrder->assertOk();
+        $this->assertSame('clear_tires', $directOrder->json('pit_commands.0.action'));
+        $this->assertSame('fuel', $directOrder->json('pit_commands.1.action'));
+        $this->assertSame(18, $directOrder->json('pit_commands.1.value'));
+
+        // 5. Immediate ahead-hazard alert
+        $hzResp = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/telemetry/hazard', [
+                'track_slug' => 'spa-up',
+                'car_name' => 'Porsche 911 GT3 R (992)',
+                'ahead_meters' => 245,
+            ]);
+        $hzResp->assertOk();
+        $this->assertStringContainsString('250 metros', $hzResp->json('radio_callouts.0.text'));
     }
 
     /**

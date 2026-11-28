@@ -18,6 +18,10 @@ var ErrInvalidICO = errors.New("tray: invalid .ico header")
 type Options struct {
 	InitialStatus string
 	PanelURL      string
+	GetVolume     func() int
+	OnSetVolume   func(pct int)
+	GetPTTLabel   func() string
+	OnBindPTT     func()
 	IsMuted       func() bool
 	OnToggleMute  func()
 	OnTestRadio   func()

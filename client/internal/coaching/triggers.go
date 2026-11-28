@@ -90,6 +90,7 @@ func (l *LogSpeaker) Speak(t Trigger) {
 // with lock-free plan updates (atomic.Pointer) and zero heap allocations.
 type Evaluator struct {
 	activePlan   atomic.Pointer[Plan]
+	silenced     atomic.Bool
 	speaker      Speaker
 	seenPlanPtr  *Plan
 	lastFiredLap [MaxTriggersPerPlan]int32
@@ -100,6 +101,16 @@ type Evaluator struct {
 // NewEvaluator creates a lock-free spatial trigger evaluator.
 func NewEvaluator(speaker Speaker) *Evaluator {
 	return &Evaluator{speaker: speaker}
+}
+
+// SetSilenced enables or disables temporary combat/qualifying silence without losing track position.
+func (e *Evaluator) SetSilenced(silenced bool) {
+	e.silenced.Store(silenced)
+}
+
+// IsSilenced reports whether technical corner triggers are currently muted (e.g. close wheel-to-wheel battle).
+func (e *Evaluator) IsSilenced() bool {
+	return e.silenced.Load()
 }
 
 // SetPlan atomically swaps the active coaching plan from any background goroutine.
@@ -142,7 +153,7 @@ func (e *Evaluator) Step(currLap int32, currPct float32, onPitRoad bool) {
 	prevPct := e.prevPct
 	e.prevPct = currPct
 
-	if plan == nil || len(plan.Triggers) == 0 || e.speaker == nil {
+	if e.silenced.Load() || plan == nil || len(plan.Triggers) == 0 || e.speaker == nil {
 		return
 	}
 

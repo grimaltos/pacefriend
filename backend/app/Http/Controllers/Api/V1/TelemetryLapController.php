@@ -11,6 +11,8 @@ use App\Models\Track;
 use App\Models\User;
 use App\Services\Coaching\CoachDiagnosticService;
 use App\Services\Coaching\CommunityKnowledgeService;
+use App\Services\Coaching\NaturalVoiceEngineerService;
+use App\Services\Coaching\RaceStrategyService;
 use App\Services\Coaching\RadioEngineerService;
 use App\Services\Coaching\ReferenceMatcherService;
 use App\Services\Garage61\Garage61ImporterService;
@@ -25,6 +27,8 @@ class TelemetryLapController extends Controller
         private readonly ReferenceMatcherService $matcher,
         private readonly CoachDiagnosticService $diagnostic,
         private readonly RadioEngineerService $radioEngineer,
+        private readonly RaceStrategyService $raceStrategy,
+        private readonly NaturalVoiceEngineerService $voiceEngineer,
         private readonly Garage61ImporterService $g61Importer,
         private readonly CommunityKnowledgeService $communityKnowledge,
     ) {}
@@ -45,6 +49,7 @@ class TelemetryLapController extends Controller
             'sector_splits' => ['nullable', 'array', 'max:24'],
             'sector_splits.*' => ['numeric', 'min:0', 'max:1'],
             'reason' => ['nullable', 'in:session_start,conditions_changed'],
+            'race_context' => ['nullable', 'array'],
         ]);
 
         /** @var User $user */
@@ -91,25 +96,45 @@ class TelemetryLapController extends Controller
             $referenceLap?->id
         );
 
-        $callouts = $this->radioEngineer->buildBriefing(
-            $user,
-            $track,
-            $trackTempC,
-            $airTempC,
-            $isWet,
-            $fuelLevelL,
-            $referenceLap,
-            (string) ($validated['reason'] ?? 'session_start'),
-            $match['discarded_reason'],
-            $match['discarded_ref']
-        );
+        $raceCtx = is_array($validated['race_context'] ?? null) ? $validated['race_context'] : [];
+        $sessionType = (string) ($raceCtx['session_type'] ?? 'practice');
+        $reason = (string) ($validated['reason'] ?? 'session_start');
+        $pitCommands = [];
+
+        if ($reason === 'session_start' && in_array($sessionType, ['race', 'qualify'], true)) {
+            $raceBrief = $this->raceStrategy->buildSessionBriefing(
+                $user,
+                $track,
+                $trackTempC,
+                $airTempC,
+                $isWet,
+                $fuelLevelL,
+                $referenceLap,
+                $raceCtx
+            );
+            $callouts = $raceBrief['callouts'];
+            $pitCommands = $raceBrief['pit_commands'];
+        } else {
+            $callouts = $this->radioEngineer->buildBriefing(
+                $user,
+                $track,
+                $trackTempC,
+                $airTempC,
+                $isWet,
+                $fuelLevelL,
+                $referenceLap,
+                $reason,
+                $match['discarded_reason'],
+                $match['discarded_ref']
+            );
+        }
 
         return response()->json([
             'status' => 'ok',
             'driving_session_id' => $session->id,
             'matched_reference_lap_id' => $referenceLap?->id,
             'radio_callouts' => $callouts,
-            'audio_settings' => $this->clientAudioSettings($user),
+            'pit_commands' => $pitCommands,
         ]);
     }
 
@@ -137,6 +162,7 @@ class TelemetryLapController extends Controller
             'is_wet' => ['nullable', 'boolean'],
             'sector_splits' => ['nullable', 'array', 'max:24'],
             'sector_splits.*' => ['numeric', 'min:0', 'max:1'],
+            'race_context' => ['nullable', 'array'],
             'samples' => ['required', 'array', 'min:3'],
             'samples.*.t_ms' => ['required', 'integer', 'min:0'],
             'samples.*.pct' => ['required', 'numeric', 'min:0', 'max:1'],
@@ -306,6 +332,9 @@ class TelemetryLapController extends Controller
         if (isset($previousPlan['_radio_flags']) && is_array($storedPlan)) {
             $storedPlan['_radio_flags'] = $previousPlan['_radio_flags'];
         }
+        if (isset($previousPlan['_pending_pit']) && is_array($storedPlan)) {
+            $storedPlan['_pending_pit'] = $previousPlan['_pending_pit'];
+        }
 
         $session->update([
             'active_reference_lap_id' => $referenceLap?->id,
@@ -361,6 +390,7 @@ class TelemetryLapController extends Controller
             'sector_splits' => ['nullable', 'array', 'max:24'],
             'sector_splits.*' => ['numeric', 'min:0', 'max:1'],
             'sample_rate_hz' => ['nullable', 'integer', 'min:1', 'max:360'],
+            'race_context' => ['nullable', 'array'],
             'samples' => ['required', 'array', 'min:5'],
             'samples.*.t_ms' => ['required', 'integer', 'min:0'],
             'samples.*.pct' => ['required', 'numeric', 'min:0', 'max:1'],
@@ -485,17 +515,30 @@ class TelemetryLapController extends Controller
             }
         }
 
+        $raceCtx = is_array($validated['race_context'] ?? null) ? $validated['race_context'] : [];
+        $sessionType = (string) ($raceCtx['session_type'] ?? 'practice');
+        $inTraffic = ! empty($raceCtx['in_traffic']);
+        $isCleanForTechnical = (bool) $validated['is_clean'] && ! $inTraffic;
+
         $rawCorners = $this->normalizer->extractCornerBaselines(
             $validated['samples'],
             $track->corners ?? [],
             (int) $validated['lap_time_ms'],
             $track->length_km,
-            (bool) $validated['is_clean']
+            $isCleanForTechnical
         );
 
         $cornerMetrics = $referenceLap !== null
             ? $this->normalizer->compareAgainstReference($rawCorners, $referenceLap->corner_baselines ?? [], $track->length_km)
             : $rawCorners;
+
+        if ($inTraffic) {
+            foreach ($cornerMetrics as &$cm) {
+                $cm['is_clean'] = false;
+                $cm['in_traffic'] = true;
+            }
+            unset($cm);
+        }
 
         $sectorMetrics = $this->normalizer->compareSectorsAgainstReference(
             $rawSectors,
@@ -543,7 +586,9 @@ class TelemetryLapController extends Controller
 
         // Feed PaceFriend's collective anonymized pool, track auto-discovery, G-profile & coaching feedback loop!
         $this->communityKnowledge->recordCoachingOutcome($lap, $previousPlan);
-        $this->communityKnowledge->ingestCleanLap($lap, $track);
+        if (! $inTraffic) {
+            $this->communityKnowledge->ingestCleanLap($lap, $track);
+        }
 
         $newLapsCount = $session->laps_count + 1;
         $newCleanCount = $session->clean_laps_count + ($lap->is_clean ? 1 : 0);
@@ -574,22 +619,49 @@ class TelemetryLapController extends Controller
         $straightBrakeDragMs = $this->normalizer->detectStraightBrakeDragMs($validated['samples']);
 
         $session->clean_laps_count = $newCleanCount;
-        $radioCallouts = $this->radioEngineer->buildLapCrossingCallouts(
-            $user,
-            $session,
-            $lap,
-            $previousBestMs,
-            $previousPlan,
-            $previousRef,
-            $referenceLap,
-            $avgFuelUsed !== null ? (float) $avgFuelUsed : $fuelUsedL,
-            $radioFlags,
-            $straightBrakeDragMs
-        );
+        $pitCommands = [];
+        $pendingPit = is_array($previousPlan['_pending_pit'] ?? null) ? $previousPlan['_pending_pit'] : null;
+
+        if ($sessionType === 'race') {
+            $raceEval = $this->raceStrategy->evaluateRaceLap(
+                $user,
+                $session,
+                $track,
+                $lap,
+                $previousBestMs,
+                $avgFuelUsed !== null ? (float) $avgFuelUsed : $fuelUsedL,
+                $raceCtx,
+                $radioFlags,
+                $straightBrakeDragMs
+            );
+            $radioCallouts = $raceEval['callouts'];
+            $pitCommands = $raceEval['pit_commands'];
+            if ($raceEval['pending_pit'] !== null) {
+                $pendingPit = $raceEval['pending_pit'];
+            }
+        } else {
+            $radioCallouts = $this->radioEngineer->buildLapCrossingCallouts(
+                $user,
+                $session,
+                $lap,
+                $previousBestMs,
+                $previousPlan,
+                $previousRef,
+                $referenceLap,
+                $avgFuelUsed !== null ? (float) $avgFuelUsed : $fuelUsedL,
+                $radioFlags,
+                $straightBrakeDragMs
+            );
+        }
 
         $storedPlan = $diagnosticResult['plan'] ?? $previousPlan ?? [];
         if ($radioFlags !== []) {
             $storedPlan['_radio_flags'] = $radioFlags;
+        }
+        if ($pendingPit !== null) {
+            $storedPlan['_pending_pit'] = $pendingPit;
+        } else {
+            unset($storedPlan['_pending_pit']);
         }
 
         $cleanSectorsTotal = $existingPartial !== null
@@ -627,8 +699,85 @@ class TelemetryLapController extends Controller
             'clean_laps_window' => $diagnosticResult['clean_laps_count'],
             'coaching_plan' => $diagnosticResult['plan'],
             'radio_callouts' => $radioCallouts,
-            'audio_settings' => $this->clientAudioSettings($user),
+            'pit_commands' => $pitCommands,
         ], 201);
+    }
+
+    /**
+     * Immediate ahead-hazard radio warning (spun/stopped car 130..480m ahead in Race/Qualy).
+     */
+    public function hazard(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'track_slug' => ['required', 'string', 'max:120'],
+            'car_name' => ['nullable', 'string', 'max:160'],
+            'ahead_meters' => ['required', 'integer', 'min:50', 'max:1500'],
+            'lap_dist_pct' => ['nullable', 'numeric', 'min:0', 'max:1'],
+        ]);
+
+        /** @var User $user */
+        $user = $request->user();
+        $callouts = $this->raceStrategy->buildAheadHazardCallout($user, (int) $validated['ahead_meters']);
+
+        return response()->json([
+            'status' => 'ok',
+            'radio_callouts' => $callouts,
+        ]);
+    }
+
+    /**
+     * Natural Push-To-Talk Voice Query & Pit-Box Action endpoint (Groq Whisper + Llama 3.3 + Deterministic Hybrid).
+     */
+    public function voiceQuery(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'track_slug' => ['nullable', 'string', 'max:120'],
+            'track_name' => ['nullable', 'string', 'max:180'],
+            'track_length_km' => ['nullable', 'numeric', 'min:0.4', 'max:30'],
+            'car_name' => ['nullable', 'string', 'max:160'],
+            'session_id' => ['nullable', 'integer', 'min:0'],
+            'sub_session_id' => ['nullable', 'integer', 'min:0'],
+            'audio_wav_base64' => ['nullable', 'string', 'max:2000000'],
+            'transcript' => ['nullable', 'string', 'max:500'],
+            'race_context' => ['nullable', 'array'],
+        ]);
+
+        /** @var User $user */
+        $user = $request->user();
+        $user->forceFill(['last_client_seen_at' => now()])->save();
+
+        $track = ! empty($validated['track_slug'])
+            ? Track::resolveOrCreateCurated(
+                (string) $validated['track_slug'],
+                (string) ($validated['track_name'] ?? $validated['track_slug']),
+                (float) ($validated['track_length_km'] ?? 5.0)
+            )
+            : null;
+
+        $session = DrivingSession::query()
+            ->where('user_id', $user->id)
+            ->whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
+
+        $raceCtx = is_array($validated['race_context'] ?? null) ? $validated['race_context'] : [];
+
+        $result = $this->voiceEngineer->handleVoiceQuery(
+            $user,
+            $session,
+            $track,
+            $validated['audio_wav_base64'] ?? null,
+            $validated['transcript'] ?? null,
+            $raceCtx
+        );
+
+        return response()->json([
+            'status' => 'ok',
+            'transcript' => $result['transcript'],
+            'reply_text' => $result['reply_text'],
+            'radio_callouts' => $result['radio_callouts'],
+            'pit_commands' => $result['pit_commands'],
+        ]);
     }
 
     public function pitStop(Request $request): JsonResponse
@@ -772,14 +921,13 @@ class TelemetryLapController extends Controller
     }
 
     /**
-     * @return array{volume: int}
+     * Volume is owned strictly by the local Windows .exe (System Tray & pacefriend.json).
+     *
+     * @return array<string, never>
      */
     private function clientAudioSettings(User $user): array
     {
-        $radio = $user->radioSettings();
-        return [
-            'volume' => $radio['volume'],
-        ];
+        return [];
     }
 
     private function resolveActiveDrivingSession(

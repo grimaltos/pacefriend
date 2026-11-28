@@ -146,6 +146,7 @@ func RequiredMemorySize(hdr *Header) int {
 type varSlot struct {
 	offset  int
 	varType VarType
+	count   int
 	present bool
 }
 
@@ -179,12 +180,41 @@ type VarIndex struct {
 	OnPitRoad                varSlot
 	IsOnTrack                varSlot
 	PlayerCarMyIncidentCount varSlot
+	PlayerCarTeamIncidents   varSlot
 	TrackTempCrew            varSlot
 	TrackTemp                varSlot
 	AirTemp                  varSlot
 	TrackWetness             varSlot
 	WeatherDeclaredWet       varSlot
+	Precipitation            varSlot
+	WindVel                  varSlot
 	FuelLevel                varSlot
+
+	// Session clock, flags, player position & Black Box pit-service channels
+	SessionNum            varSlot
+	SessionState          varSlot
+	SessionFlags          varSlot
+	SessionTimeRemain     varSlot
+	SessionLapsRemainEx   varSlot
+	SessionLapsRemain     varSlot
+	PlayerCarIdx          varSlot
+	PlayerCarPosition     varSlot
+	PlayerCarClassPos     varSlot
+	PlayerTireCompound    varSlot
+	PitSvFlags            varSlot
+	PitSvFuel             varSlot
+	PitSvTireCompound     varSlot
+
+	// 64-car live grid telemetry arrays (for race combat mute, rival pace, crossover & hazard radar)
+	CarIdxLapDistPct    varSlot
+	CarIdxEstTime       varSlot
+	CarIdxClassPosition varSlot
+	CarIdxTrackSurface  varSlot
+	CarIdxOnPitRoad     varSlot
+	CarIdxTireCompound  varSlot
+	CarIdxLastLapTime   varSlot
+	CarIdxBestLapTime   varSlot
+	CarIdxLap           varSlot
 
 	// Pit-box / garage tyre pyrometer channels (unlocked by iRacing upon stopping in pits/garage)
 	LFtempCL varSlot
@@ -223,13 +253,17 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 		entry := mem[int(hdr.VarHeaderOffset)+i*VarHeaderSize : int(hdr.VarHeaderOffset)+(i+1)*VarHeaderSize]
 		vType := VarType(binary.LittleEndian.Uint32(entry[0:4]))
 		vOffset := int(int32(binary.LittleEndian.Uint32(entry[4:8])))
+		vCount := int(int32(binary.LittleEndian.Uint32(entry[8:12])))
+		if vCount <= 0 {
+			vCount = 1
+		}
 		width := vType.byteWidth()
-		if width == 0 || vOffset < 0 || vOffset+width > bufLen {
+		if width == 0 || vOffset < 0 || vOffset+(width*vCount) > bufLen {
 			continue
 		}
 
 		name := cString(entry[16 : 16+MaxStringLen])
-		slot := varSlot{offset: vOffset, varType: vType, present: true}
+		slot := varSlot{offset: vOffset, varType: vType, count: vCount, present: true}
 
 		switch name {
 		case "Speed":
@@ -274,6 +308,8 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.IsOnTrack = slot
 		case "PlayerCarMyIncidentCount":
 			idx.PlayerCarMyIncidentCount = slot
+		case "PlayerCarTeamIncidentCount":
+			idx.PlayerCarTeamIncidents = slot
 		case "TrackTempCrew":
 			idx.TrackTempCrew = slot
 		case "TrackTemp":
@@ -284,8 +320,56 @@ func IndexVariables(mem []byte, hdr *Header) (*VarIndex, error) {
 			idx.TrackWetness = slot
 		case "WeatherDeclaredWet":
 			idx.WeatherDeclaredWet = slot
+		case "Precipitation":
+			idx.Precipitation = slot
+		case "WindVel":
+			idx.WindVel = slot
 		case "FuelLevel":
 			idx.FuelLevel = slot
+		case "SessionNum":
+			idx.SessionNum = slot
+		case "SessionState":
+			idx.SessionState = slot
+		case "SessionFlags":
+			idx.SessionFlags = slot
+		case "SessionTimeRemain":
+			idx.SessionTimeRemain = slot
+		case "SessionLapsRemainEx":
+			idx.SessionLapsRemainEx = slot
+		case "SessionLapsRemain":
+			idx.SessionLapsRemain = slot
+		case "PlayerCarIdx":
+			idx.PlayerCarIdx = slot
+		case "PlayerCarPosition":
+			idx.PlayerCarPosition = slot
+		case "PlayerCarClassPosition":
+			idx.PlayerCarClassPos = slot
+		case "PlayerTireCompound":
+			idx.PlayerTireCompound = slot
+		case "PitSvFlags":
+			idx.PitSvFlags = slot
+		case "PitSvFuel":
+			idx.PitSvFuel = slot
+		case "PitSvTireCompound":
+			idx.PitSvTireCompound = slot
+		case "CarIdxLapDistPct":
+			idx.CarIdxLapDistPct = slot
+		case "CarIdxEstTime":
+			idx.CarIdxEstTime = slot
+		case "CarIdxClassPosition":
+			idx.CarIdxClassPosition = slot
+		case "CarIdxTrackSurface":
+			idx.CarIdxTrackSurface = slot
+		case "CarIdxOnPitRoad":
+			idx.CarIdxOnPitRoad = slot
+		case "CarIdxTireCompound":
+			idx.CarIdxTireCompound = slot
+		case "CarIdxLastLapTime":
+			idx.CarIdxLastLapTime = slot
+		case "CarIdxBestLapTime":
+			idx.CarIdxBestLapTime = slot
+		case "CarIdxLap":
+			idx.CarIdxLap = slot
 		case "LFtempCL":
 			idx.LFtempCL = slot
 		case "LFtempCM":
@@ -472,13 +556,36 @@ func ReadFrameFromMemory(mem []byte, idx *VarIndex, out *telemetry.RawFrame) (bo
 		}
 		// In irsdk_TrackWetness: 0=Unknown, 1=Dry, 2..7=MostlyDry..ExtremelyWet
 		isWet := false
-		if idx.TrackWetness.present && readInt32(row, idx.TrackWetness) >= 2 {
+		out.TrackWetnessLevel = 0
+		if idx.TrackWetness.present {
+			rawW := readInt32(row, idx.TrackWetness)
+			if rawW >= 2 {
+				isWet = true
+				out.TrackWetnessLevel = rawW - 1 // 1=MostlyDry .. 6=ExtremelyWet
+			}
+		}
+		out.WeatherDeclaredWet = idx.WeatherDeclaredWet.present && readBool(row, idx.WeatherDeclaredWet)
+		if out.WeatherDeclaredWet {
 			isWet = true
 		}
-		if idx.WeatherDeclaredWet.present && readBool(row, idx.WeatherDeclaredWet) {
-			isWet = true
+		if idx.Precipitation.present {
+			out.Precipitation = readFloat32(row, idx.Precipitation)
+			if out.Precipitation >= 0.08 {
+				isWet = true
+			}
+		} else {
+			out.Precipitation = 0
+		}
+		if idx.WindVel.present {
+			out.WindVelMS = readFloat32(row, idx.WindVel)
+		} else {
+			out.WindVelMS = 0
 		}
 		out.IsWet = isWet
+
+		if idx.PlayerCarTeamIncidents.present && out.IncidentCount == 0 {
+			out.IncidentCount = readInt32(row, idx.PlayerCarTeamIncidents)
+		}
 
 		if idx.IsOnTrack.present {
 			out.IsOnTrack = readBool(row, idx.IsOnTrack)
@@ -490,6 +597,87 @@ func ReadFrameFromMemory(mem []byte, idx *VarIndex, out *telemetry.RawFrame) (bo
 			out.FuelLevelL = readFloat32(row, idx.FuelLevel)
 		} else {
 			out.FuelLevelL = 0
+		}
+
+		// Session clock, race flags & Black Box pit-service state
+		if idx.SessionNum.present {
+			out.SessionNum = readInt32(row, idx.SessionNum)
+		} else {
+			out.SessionNum = 0
+		}
+		if idx.SessionState.present {
+			out.SessionState = readInt32(row, idx.SessionState)
+		} else {
+			out.SessionState = 0
+		}
+		if idx.SessionFlags.present {
+			out.SessionFlags = uint32(readInt32(row, idx.SessionFlags))
+		} else {
+			out.SessionFlags = 0
+		}
+		if idx.SessionTimeRemain.present {
+			out.SessionTimeRemainSec = readFloat64(row, idx.SessionTimeRemain)
+		} else {
+			out.SessionTimeRemainSec = 0
+		}
+		switch {
+		case idx.SessionLapsRemainEx.present:
+			out.SessionLapsRemain = readInt32(row, idx.SessionLapsRemainEx)
+		case idx.SessionLapsRemain.present:
+			out.SessionLapsRemain = readInt32(row, idx.SessionLapsRemain)
+		default:
+			out.SessionLapsRemain = 0
+		}
+		if idx.PlayerCarIdx.present {
+			out.PlayerCarIdx = readInt32(row, idx.PlayerCarIdx)
+		} else {
+			out.PlayerCarIdx = -1
+		}
+		if idx.PlayerCarPosition.present {
+			out.PlayerPosition = readInt32(row, idx.PlayerCarPosition)
+		} else {
+			out.PlayerPosition = 0
+		}
+		if idx.PlayerCarClassPos.present {
+			out.PlayerClassPosition = readInt32(row, idx.PlayerCarClassPos)
+		} else {
+			out.PlayerClassPosition = 0
+		}
+		if idx.PlayerTireCompound.present {
+			out.PlayerTireCompound = readInt32(row, idx.PlayerTireCompound)
+		} else {
+			out.PlayerTireCompound = 0
+		}
+		if idx.PitSvFlags.present {
+			out.PitSvFlags = uint32(readInt32(row, idx.PitSvFlags))
+		} else {
+			out.PitSvFlags = 0
+		}
+		if idx.PitSvFuel.present {
+			out.PitSvFuelL = readFloat32(row, idx.PitSvFuel)
+		} else {
+			out.PitSvFuelL = 0
+		}
+		if idx.PitSvTireCompound.present {
+			out.PitSvCompound = readInt32(row, idx.PitSvTireCompound)
+		} else {
+			out.PitSvCompound = 0
+		}
+
+		// 64-car live grid telemetry arrays (zero-allocation fixed-size stack copy)
+		if idx.CarIdxLapDistPct.present {
+			out.HasGridArrays = true
+			readFloat32Array64(row, idx.CarIdxLapDistPct, &out.CarIdxLapDistPct)
+			readFloat32Array64(row, idx.CarIdxEstTime, &out.CarIdxEstTime)
+			readInt32Array64(row, idx.CarIdxClassPosition, &out.CarIdxClassPosition)
+			readInt32Array64(row, idx.CarIdxTrackSurface, &out.CarIdxTrackSurface)
+			readBoolArray64(row, idx.CarIdxOnPitRoad, &out.CarIdxOnPitRoad)
+			readInt32Array64(row, idx.CarIdxTireCompound, &out.CarIdxTireCompound)
+			readFloat32Array64(row, idx.CarIdxLastLapTime, &out.CarIdxLastLapTime)
+			readFloat32Array64(row, idx.CarIdxBestLapTime, &out.CarIdxBestLapTime)
+			readInt32Array64(row, idx.CarIdxLap, &out.CarIdxLap)
+		} else {
+			out.HasGridArrays = false
 		}
 
 		out.TyreLFTempC = readTyreTempC(row, idx.LFtempCL, idx.LFtempCM, idx.LFtempCR, idx.LFtempM)
@@ -554,6 +742,54 @@ func readBool(row []byte, s varSlot) bool {
 	return row[s.offset] != 0
 }
 
+func readFloat32Array64(row []byte, s varSlot, dst *[telemetry.MaxSimCars]float32) {
+	if !s.present || s.varType != VarTypeFloat {
+		*dst = [telemetry.MaxSimCars]float32{}
+		return
+	}
+	n := s.count
+	if n > telemetry.MaxSimCars {
+		n = telemetry.MaxSimCars
+	}
+	for i := 0; i < n; i++ {
+		off := s.offset + i*4
+		dst[i] = math.Float32frombits(binary.LittleEndian.Uint32(row[off : off+4]))
+	}
+}
+
+func readInt32Array64(row []byte, s varSlot, dst *[telemetry.MaxSimCars]int32) {
+	if !s.present || (s.varType != VarTypeInt && s.varType != VarTypeBitField) {
+		*dst = [telemetry.MaxSimCars]int32{}
+		return
+	}
+	n := s.count
+	if n > telemetry.MaxSimCars {
+		n = telemetry.MaxSimCars
+	}
+	for i := 0; i < n; i++ {
+		off := s.offset + i*4
+		dst[i] = int32(binary.LittleEndian.Uint32(row[off : off+4]))
+	}
+}
+
+func readBoolArray64(row []byte, s varSlot, dst *[telemetry.MaxSimCars]bool) {
+	if !s.present {
+		*dst = [telemetry.MaxSimCars]bool{}
+		return
+	}
+	n := s.count
+	if n > telemetry.MaxSimCars {
+		n = telemetry.MaxSimCars
+	}
+	width := s.varType.byteWidth()
+	if width <= 0 {
+		return
+	}
+	for i := 0; i < n; i++ {
+		dst[i] = row[s.offset+i*width] != 0
+	}
+}
+
 func readTyreTempC(row []byte, cl, cm, cr, fallbackM varSlot) float32 {
 	var sum float32
 	var count int
@@ -595,8 +831,10 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 	var meta telemetry.SessionMetadata
 	driverCarIdx := -1
 	currentCarIdx := -2
+	currentSessionNum := -1
 	inDriversList := false
 	inSectorsList := false
+	inSessionsList := false
 
 	lines := strings.Split(string(raw), "\n")
 	for _, line := range lines {
@@ -609,24 +847,43 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && strings.HasSuffix(trimmed, ":") {
 			inDriversList = false
 			inSectorsList = false
+			inSessionsList = false
 			currentCarIdx = -2
+			currentSessionNum = -1
 			continue
 		}
 
 		if trimmed == "Drivers:" {
 			inDriversList = true
 			inSectorsList = false
+			inSessionsList = false
 			currentCarIdx = -2
 			continue
 		}
 		if trimmed == "Sectors:" {
 			inSectorsList = true
 			inDriversList = false
+			inSessionsList = false
 			continue
 		}
+		if trimmed == "Sessions:" {
+			inSessionsList = true
+			inDriversList = false
+			inSectorsList = false
+			currentSessionNum = -1
+			continue
+		}
+		if inSessionsList && strings.HasSuffix(trimmed, ":") {
+			// Nested list inside a Session (e.g. ResultsPositions:, ResultsFastestLap:) -> ignore nested items
+			if trimmed != "Sessions:" {
+				continue
+			}
+		}
 
-		if (inDriversList || inSectorsList) && strings.HasPrefix(trimmed, "- ") {
-			currentCarIdx = -2
+		if (inDriversList || inSectorsList || inSessionsList) && strings.HasPrefix(trimmed, "- ") {
+			if inDriversList {
+				currentCarIdx = -2
+			}
 			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
 		}
 
@@ -641,6 +898,20 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 			if key == "SectorStartPct" {
 				if pct, err := strconv.ParseFloat(val, 32); err == nil && pct >= 0.0 && pct < 1.0 {
 					meta.SectorSplits = append(meta.SectorSplits, float32(pct))
+				}
+			}
+			continue
+		}
+
+		if inSessionsList {
+			switch key {
+			case "SessionNum":
+				if v, err := strconv.Atoi(val); err == nil {
+					currentSessionNum = v
+				}
+			case "SessionType":
+				if currentSessionNum >= 0 && currentSessionNum < len(meta.SessionTypes) {
+					meta.SessionTypes[currentSessionNum] = normalizeSessionType(val)
 				}
 			}
 			continue
@@ -668,9 +939,17 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 				if v, err := strconv.Atoi(val); err == nil {
 					meta.SubSessionID = v
 				}
+			case "IncidentLimit":
+				fields := strings.Fields(val)
+				if len(fields) > 0 {
+					if lim, err := strconv.Atoi(fields[0]); err == nil && lim > 0 {
+						meta.IncidentLimit = lim
+					}
+				}
 			case "DriverCarIdx":
 				if v, err := strconv.Atoi(val); err == nil {
 					driverCarIdx = v
+					meta.DriverCarIdx = v
 				}
 			}
 			continue
@@ -690,6 +969,22 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 			if driverCarIdx >= 0 && currentCarIdx == driverCarIdx && meta.CarName == "" {
 				meta.CarName = val
 			}
+		case "CarClassID":
+			if currentCarIdx >= 0 && currentCarIdx < telemetry.MaxSimCars {
+				if v, err := strconv.Atoi(val); err == nil {
+					meta.CarClassIDs[currentCarIdx] = v
+				}
+			}
+		case "CarClassRelSpeed":
+			if currentCarIdx >= 0 && currentCarIdx < telemetry.MaxSimCars {
+				if v, err := strconv.Atoi(val); err == nil {
+					meta.CarClassRelSpeed[currentCarIdx] = v
+				}
+			}
+		case "IsSpectator":
+			if currentCarIdx >= 0 && currentCarIdx < telemetry.MaxSimCars {
+				meta.CarIsSpectator[currentCarIdx] = val == "1"
+			}
 		}
 	}
 
@@ -700,6 +995,18 @@ func ParseSessionInfoYAML(raw []byte) telemetry.SessionMetadata {
 		meta.TrackSlug = slugify(meta.TrackName)
 	}
 	return meta
+}
+
+func normalizeSessionType(raw string) string {
+	low := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.Contains(low, "race") || strings.Contains(low, "heat") || strings.Contains(low, "feature"):
+		return "race"
+	case strings.Contains(low, "qual"):
+		return "qualify"
+	default:
+		return "practice"
+	}
 }
 
 func slugify(s string) string {

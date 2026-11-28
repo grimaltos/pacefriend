@@ -21,10 +21,11 @@ type Config struct {
 	MaxLaps          int // Optional: stop automatically after N completed flying laps (useful in -sim)
 	Logger           *slog.Logger
 	OnMetadataChange func(telemetry.SessionMetadata)
+	OnLiveState      func(telemetry.SessionMetadata, telemetry.RaceContext)
 }
 
 // Runner coordinates the 20 Hz sampling ticker, zero-GC ring buffer, lap-crossing
-// detector, spatial trigger evaluator, and non-blocking HTTP uploader.
+// detector, spatial trigger evaluator, race combat discipline, and non-blocking HTTP uploader.
 type Runner struct {
 	cfg       Config
 	source    telemetry.Source
@@ -33,6 +34,12 @@ type Runner struct {
 	evaluator *coaching.Evaluator
 	uploader  *transport.Uploader
 	logger    *slog.Logger
+
+	cachedMeta        telemetry.SessionMetadata
+	metaLoaded        bool
+	lastRaceCtx       telemetry.RaceContext
+	lapHadTraffic     bool
+	lastHazardTimeSec float64
 
 	initialized       bool
 	activeLap         int32
@@ -48,6 +55,7 @@ type Runner struct {
 
 	// Engineer radio briefing & pit tyre pyrometer state
 	briefingSent          bool
+	briefedSessionType    string
 	briefedTrackTempC     float32
 	briefedIsWet          bool
 	droveOnTrackThisStint bool
@@ -109,6 +117,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var frame telemetry.RawFrame
 	lastMeta := r.source.SessionMetadata()
+	r.cachedMeta = lastMeta
+	r.metaLoaded = true
 	metaCheckTick := 0
 
 	for {
@@ -124,11 +134,16 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			metaCheckTick++
-			if r.cfg.OnMetadataChange != nil && metaCheckTick >= r.cfg.SampleRateHz {
+			if metaCheckTick >= r.cfg.SampleRateHz {
 				metaCheckTick = 0
-				if curMeta := r.source.SessionMetadata(); curMeta.TrackName != lastMeta.TrackName || curMeta.CarName != lastMeta.CarName {
+				curMeta := r.source.SessionMetadata()
+				r.cachedMeta = curMeta
+				if r.cfg.OnMetadataChange != nil && (curMeta.TrackName != lastMeta.TrackName || curMeta.CarName != lastMeta.CarName) {
 					lastMeta = curMeta
 					r.cfg.OnMetadataChange(curMeta)
+				}
+				if r.cfg.OnLiveState != nil {
+					r.cfg.OnLiveState(curMeta, r.lastRaceCtx)
 				}
 			}
 			if stop := r.ProcessFrame(now, &frame); stop {
@@ -141,11 +156,40 @@ func (r *Runner) Run(ctx context.Context) error {
 // ProcessFrame handles one sampled frame. Exposed for deterministic unit testing
 // and zero-allocation benchmarking without wall-clock sleeps.
 func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bool) {
+	if !r.metaLoaded {
+		r.cachedMeta = r.source.SessionMetadata()
+		r.metaLoaded = true
+	}
+
 	currLap := frame.Sample.Lap
 	currPct := frame.Sample.LapDistPct
 	onPitRoad := frame.Sample.Flags&telemetry.FlagOnPitRoad != 0
 
-	r.evaluateBriefingAndPitTyres(frame, onPitRoad)
+	rc, hazardAheadMeters := r.computeLiveRaceContext(frame, &r.cachedMeta)
+	r.lastRaceCtx = rc
+
+	if r.evaluator != nil {
+		inCombat := rc.SessionType == "race" && rc.InTraffic
+		qualyFlying := rc.SessionType == "qualify" && r.fullFlyingLap && !r.lapDirty
+		r.evaluator.SetSilenced(inCombat || qualyFlying)
+	}
+
+	if rc.InTraffic {
+		r.lapHadTraffic = true
+	}
+
+	// Immediate ahead hazard warning (spun/off-track car 130..480m ahead in Race/Qualy)
+	if hazardAheadMeters > 0 && r.uploader != nil && (frame.SessionTimeSec-r.lastHazardTimeSec) > 22.0 && frame.SessionTimeSec > 5.0 {
+		r.lastHazardTimeSec = frame.SessionTimeSec
+		r.uploader.EnqueueHazardAlert(transport.HazardAlertRequest{
+			TrackSlug:   r.cachedMeta.TrackSlug,
+			CarName:     r.cachedMeta.CarName,
+			AheadMeters: hazardAheadMeters,
+			LapDistPct:  currPct,
+		})
+	}
+
+	r.evaluateBriefingAndPitTyres(frame, onPitRoad, &rc)
 
 	if !r.initialized {
 		r.initialized = true
@@ -189,6 +233,7 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 		r.activeLap = currLap
 		r.fullFlyingLap = crossedFinishLine && currLap >= 1
 		r.lapDirty = onPitRoad || (frame.Sample.Flags&telemetry.FlagOffTrack != 0)
+		r.lapHadTraffic = rc.InTraffic
 		r.lapStartTimeSec = frame.SessionTimeSec
 		r.lapStartWall = now
 		r.lapStartIncidents = frame.IncidentCount
@@ -229,19 +274,25 @@ func (r *Runner) ProcessFrame(now time.Time, frame *telemetry.RawFrame) (stop bo
 	return false
 }
 
-func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoad bool) {
+func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoad bool, rc *telemetry.RaceContext) {
 	if r.uploader == nil {
 		return
 	}
 
-	// 1. Out-lap / Session Start Greeting & Weather-Shift Alerts
-	if frame.IsOnTrack && !onPitRoad {
-		if !r.briefingSent {
-			meta := r.source.SessionMetadata()
+	// 1. Out-lap / Grid / Session Start Greeting & Session/Weather-Shift Alerts
+	// In Race mode, send briefing as soon as driver enters grid (even before moving off pit/grid slot!)
+	readyForBriefing := frame.IsOnTrack && (!onPitRoad || rc.SessionType == "race")
+	sessionChanged := r.briefingSent && rc.SessionType != "" && r.briefedSessionType != "" && rc.SessionType != r.briefedSessionType
+
+	if readyForBriefing {
+		if !r.briefingSent || sessionChanged {
+			meta := r.cachedMeta
 			if meta.TrackSlug != "" && meta.CarName != "" {
 				r.briefingSent = true
+				r.briefedSessionType = rc.SessionType
 				r.briefedTrackTempC = frame.TrackTempC
 				r.briefedIsWet = frame.IsWet
+				rcCopy := *rc
 				r.uploader.EnqueueBriefing(transport.BriefingRequest{
 					TrackSlug:     meta.TrackSlug,
 					TrackName:     meta.TrackName,
@@ -255,12 +306,14 @@ func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoa
 					FuelLevelL:    frame.FuelLevelL,
 					SectorSplits:  meta.SectorSplits,
 					Reason:        "session_start",
+					Race:          &rcCopy,
 				})
 			}
-		} else if frame.TrackTempC > 0 && (frame.IsWet != r.briefedIsWet || math.Abs(float64(frame.TrackTempC-r.briefedTrackTempC)) >= 3.0) {
-			meta := r.source.SessionMetadata()
+		} else if !onPitRoad && frame.TrackTempC > 0 && (frame.IsWet != r.briefedIsWet || math.Abs(float64(frame.TrackTempC-r.briefedTrackTempC)) >= 3.0) {
+			meta := r.cachedMeta
 			r.briefedTrackTempC = frame.TrackTempC
 			r.briefedIsWet = frame.IsWet
+			rcCopy := *rc
 			r.uploader.EnqueueBriefing(transport.BriefingRequest{
 				TrackSlug:     meta.TrackSlug,
 				TrackName:     meta.TrackName,
@@ -273,6 +326,7 @@ func (r *Runner) evaluateBriefingAndPitTyres(frame *telemetry.RawFrame, onPitRoa
 				IsWet:         frame.IsWet,
 				FuelLevelL:    frame.FuelLevelL,
 				Reason:        "conditions_changed",
+				Race:          &rcCopy,
 			})
 		}
 	}
@@ -366,7 +420,8 @@ func (r *Runner) emitSector(frame *telemetry.RawFrame, lap int32, num int, start
 		}
 		return
 	}
-	meta := r.source.SessionMetadata()
+	meta := r.cachedMeta
+	rcCopy := r.lastRaceCtx
 	r.uploader.EnqueueSector(telemetry.CompletedSector{
 		UserID:         r.cfg.UserID,
 		TrackSlug:      meta.TrackSlug,
@@ -380,11 +435,12 @@ func (r *Runner) emitSector(frame *telemetry.RawFrame, lap int32, num int, start
 		SectorStartPct: startPct,
 		SectorEndPct:   endPct,
 		SectorTimeMs:   uint32(durMs),
-		IsClean:        r.secCleanEntry && !r.secHadDirty,
+		IsClean:        r.secCleanEntry && !r.secHadDirty && !rcCopy.InTraffic,
 		TrackTempC:     frame.TrackTempC,
 		AirTempC:       frame.AirTempC,
 		IsWet:          frame.IsWet,
 		SectorSplits:   meta.SectorSplits,
+		Race:           &rcCopy,
 	}, batch)
 }
 
@@ -415,7 +471,11 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 		fuelUsedL = r.lapStartFuelL - crossingFrame.FuelLevelL
 	}
 
-	meta := r.source.SessionMetadata()
+	meta := r.cachedMeta
+	rcCopy := r.lastRaceCtx
+	if r.lapHadTraffic {
+		rcCopy.InTraffic = true
+	}
 	completed := telemetry.CompletedLap{
 		UserID:        r.cfg.UserID,
 		TrackSlug:     meta.TrackSlug,
@@ -435,6 +495,7 @@ func (r *Runner) emitCompletedLap(now time.Time, crossingFrame *telemetry.RawFra
 		FuelUsedL:     fuelUsedL,
 		SectorSplits:  meta.SectorSplits,
 		SampleRateHz:  r.cfg.SampleRateHz,
+		Race:          &rcCopy,
 	}
 
 	if r.logger != nil {
@@ -466,4 +527,180 @@ func (r *Runner) computeRelativeMs(now time.Time, sessionTimeSec float64) uint32
 		return 0
 	}
 	return uint32(ms)
+}
+
+func (r *Runner) computeLiveRaceContext(frame *telemetry.RawFrame, meta *telemetry.SessionMetadata) (telemetry.RaceContext, int) {
+	rc := telemetry.RaceContext{
+		SessionType:        meta.SessionTypeFor(frame.SessionNum),
+		SessionState:       frame.SessionState,
+		SessionFlags:       frame.SessionFlags,
+		TimeRemainSec:      frame.SessionTimeRemainSec,
+		LapsRemain:         frame.SessionLapsRemain,
+		IncidentCount:      frame.IncidentCount,
+		IncidentLimit:      meta.IncidentLimit,
+		ClassPosition:      frame.PlayerClassPosition,
+		OverallPosition:    frame.PlayerPosition,
+		Precipitation:      frame.Precipitation,
+		TrackWetnessLevel:  frame.TrackWetnessLevel,
+		WeatherDeclaredWet: frame.WeatherDeclaredWet,
+		WindSpeedKmh:       frame.WindVelMS * 3.6,
+		PlayerCompound:     frame.PlayerTireCompound,
+		PitSvFlags:         frame.PitSvFlags,
+		PitSvFuelL:         frame.PitSvFuelL,
+		PitSvCompound:      frame.PitSvCompound,
+		FuelLevelL:         frame.FuelLevelL,
+		TrackTempC:         frame.TrackTempC,
+		AirTempC:           frame.AirTempC,
+		StintLaps:          r.stintLaps,
+	}
+
+	if !frame.HasGridArrays {
+		return rc, 0
+	}
+
+	pIdx := int(frame.PlayerCarIdx)
+	if pIdx < 0 || pIdx >= telemetry.MaxSimCars {
+		pIdx = meta.DriverCarIdx
+	}
+	if pIdx < 0 || pIdx >= telemetry.MaxSimCars {
+		return rc, 0
+	}
+
+	if rc.ClassPosition <= 0 {
+		rc.ClassPosition = frame.CarIdxClassPosition[pIdx]
+	}
+
+	trackMeters := float32(meta.TrackLengthKm * 1000.0)
+	if trackMeters < 1000.0 {
+		trackMeters = 5000.0
+	}
+	estLapSec := trackMeters / 48.0
+	if frame.LapLastLapTimeSec > 25.0 && frame.LapLastLapTimeSec < 400.0 {
+		estLapSec = frame.LapLastLapTimeSec
+	}
+
+	playerClassID := meta.CarClassIDs[pIdx]
+	playerRelSpeed := meta.CarClassRelSpeed[pIdx]
+	playerPct := frame.Sample.LapDistPct
+
+	var drySumMs int64
+	var wetSumMs int64
+	var closestQualyAheadSec float32
+	var closestFasterClassSec float32
+	hazardMeters := 0
+
+	for i := 0; i < telemetry.MaxSimCars; i++ {
+		if i == pIdx || meta.CarIsSpectator[i] {
+			continue
+		}
+		cPct := frame.CarIdxLapDistPct[i]
+		cPos := frame.CarIdxClassPosition[i]
+		if frame.CarIdxLap[i] <= 0 && cPos <= 0 && cPct <= 0 {
+			continue
+		}
+
+		sameClass := playerClassID == 0 || meta.CarClassIDs[i] == 0 || meta.CarClassIDs[i] == playerClassID
+		if !sameClass {
+			rc.IsMulticlass = true
+			if playerRelSpeed > 0 && meta.CarClassRelSpeed[i] > playerRelSpeed+4 && !frame.CarIdxOnPitRoad[i] && cPct >= 0 {
+				behindPct := wrapUnitPct(playerPct - cPct)
+				if behindPct > 0.002 && behindPct < 0.25 {
+					closingSec := behindPct * estLapSec
+					if closestFasterClassSec == 0 || closingSec < closestFasterClassSec {
+						closestFasterClassSec = closingSec
+					}
+				}
+			}
+		} else {
+			rc.CarsInClass++
+
+			// Aggregate live dry vs wet lap pace across same-class cars for Crossover detection
+			lastS := frame.CarIdxLastLapTime[i]
+			if lastS > 25.0 && lastS < 500.0 && !frame.CarIdxOnPitRoad[i] {
+				ms := int64(lastS * 1000.0)
+				if frame.CarIdxTireCompound[i] >= 1 {
+					wetSumMs += ms
+					rc.WetCarsCount++
+				} else {
+					drySumMs += ms
+					rc.DryCarsCount++
+				}
+			}
+
+			if rc.SessionType == "race" && rc.ClassPosition > 0 && cPos > 0 {
+				if cPos == rc.ClassPosition-1 {
+					rc.GapAheadSec = computeCarGapSec(cPct, playerPct, frame.CarIdxEstTime[i], frame.CarIdxEstTime[pIdx], estLapSec)
+					rc.AheadLastLapMs = int32(frame.CarIdxLastLapTime[i] * 1000.0)
+					rc.AheadBestLapMs = int32(frame.CarIdxBestLapTime[i] * 1000.0)
+					rc.AheadOnPit = frame.CarIdxOnPitRoad[i]
+				} else if cPos == rc.ClassPosition+1 {
+					rc.GapBehindSec = computeCarGapSec(playerPct, cPct, frame.CarIdxEstTime[pIdx], frame.CarIdxEstTime[i], estLapSec)
+					rc.BehindLastLapMs = int32(frame.CarIdxLastLapTime[i] * 1000.0)
+					rc.BehindBestLapMs = int32(frame.CarIdxBestLapTime[i] * 1000.0)
+				}
+			} else if rc.SessionType == "qualify" && !frame.CarIdxOnPitRoad[i] && cPct >= 0 {
+				aheadPct := wrapUnitPct(cPct - playerPct)
+				if aheadPct > 0.002 && aheadPct < 0.35 {
+					sec := aheadPct * estLapSec
+					if closestQualyAheadSec == 0 || sec < closestQualyAheadSec {
+						closestQualyAheadSec = sec
+					}
+				}
+			}
+		}
+
+		// Ahead hazard radar: off-track car 130..480m ahead while approaching at racing speed
+		if rc.SessionType != "practice" && !frame.CarIdxOnPitRoad[i] && frame.CarIdxTrackSurface[i] == 0 && frame.Sample.Speed > 28.0 && cPct >= 0 {
+			aheadPct := wrapUnitPct(cPct - playerPct)
+			aheadM := aheadPct * trackMeters
+			if aheadM >= 130.0 && aheadM <= 480.0 {
+				m := int(aheadM)
+				if hazardMeters == 0 || m < hazardMeters {
+					hazardMeters = m
+				}
+			}
+		}
+	}
+
+	rc.CarsInClass++ // Include player car itself
+	if rc.DryCarsCount > 0 {
+		rc.DryCarsAvgLapMs = int32(drySumMs / int64(rc.DryCarsCount))
+	}
+	if rc.WetCarsCount > 0 {
+		rc.WetCarsAvgLapMs = int32(wetSumMs / int64(rc.WetCarsCount))
+	}
+	if rc.SessionType == "qualify" && closestQualyAheadSec > 0 {
+		rc.GapAheadSec = closestQualyAheadSec
+	}
+	rc.FasterClassClosingSec = closestFasterClassSec
+
+	if rc.SessionType == "race" && ((rc.GapAheadSec > 0.05 && rc.GapAheadSec < 1.35) || (rc.GapBehindSec > 0.05 && rc.GapBehindSec < 0.90)) {
+		rc.InTraffic = true
+	}
+
+	return rc, hazardMeters
+}
+
+func wrapUnitPct(d float32) float32 {
+	if d < 0 {
+		d += 1.0
+	}
+	if d >= 1.0 {
+		d -= 1.0
+	}
+	return d
+}
+
+func computeCarGapSec(leaderPct, trailerPct, leaderEst, trailerEst, estLapSec float32) float32 {
+	pctDiff := wrapUnitPct(leaderPct - trailerPct)
+	if leaderEst > 0 && trailerEst > 0 {
+		estDiff := leaderEst - trailerEst
+		if estDiff < 0 {
+			estDiff += estLapSec
+		}
+		if estDiff > 0.05 && estDiff < estLapSec {
+			return estDiff
+		}
+	}
+	return pctDiff * estLapSec
 }

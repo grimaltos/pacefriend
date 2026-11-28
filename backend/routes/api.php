@@ -15,6 +15,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/telemetry/sector', [TelemetryLapController::class, 'storeSector'])->name('api.v1.telemetry.sector');
         Route::post('/telemetry/lap', [TelemetryLapController::class, 'store'])->name('api.v1.telemetry.lap');
         Route::post('/telemetry/pit-stop', [TelemetryLapController::class, 'pitStop'])->name('api.v1.telemetry.pit_stop');
+        Route::post('/telemetry/hazard', [TelemetryLapController::class, 'hazard'])->name('api.v1.telemetry.hazard');
+        Route::post('/telemetry/voice-query', [TelemetryLapController::class, 'voiceQuery'])->name('api.v1.telemetry.voice_query');
         Route::post('/telemetry/radio-test', [TelemetryLapController::class, 'radioTest'])->name('api.v1.telemetry.radio_test');
         Route::post('/telemetry/session/end', [TelemetryLapController::class, 'endSession'])->name('api.v1.telemetry.session.end');
     });

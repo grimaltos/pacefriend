@@ -23,7 +23,6 @@ const profileForm = useForm({
 const radioDefaults = props.profile.radio || {};
 const radioForm = useForm({
     voice_id: radioDefaults.voice_id || 'es-ES-AlvaroNeural',
-    volume: radioDefaults.volume ?? 85,
     radio_beep: radioDefaults.radio_beep ?? true,
     pit_wall_fx: radioDefaults.pit_wall_fx ?? true,
     finish_callout_mode: radioDefaults.finish_callout_mode || 'full',
@@ -31,6 +30,10 @@ const radioForm = useForm({
     min_clean_laps: radioDefaults.min_clean_laps || 3,
     fuel_alerts: radioDefaults.fuel_alerts ?? true,
     tyre_temp_alerts: radioDefaults.tyre_temp_alerts ?? true,
+    pit_automation_mode: radioDefaults.pit_automation_mode || 'confirm',
+    crewchief_coexistence: radioDefaults.crewchief_coexistence ?? true,
+    groq_api_key: '',
+    clear_groq_key: false,
 });
 
 const g61Form = useForm({
@@ -54,7 +57,12 @@ function saveProfile() {
 }
 
 function saveRadio() {
-    radioForm.put('/settings/radio');
+    radioForm.put('/settings/radio', {
+        onSuccess: () => {
+            radioForm.groq_api_key = '';
+            radioForm.clear_groq_key = false;
+        },
+    });
 }
 
 async function testRadioPreview() {
@@ -82,7 +90,6 @@ async function testRadioPreview() {
             headers,
             body: JSON.stringify({
                 voice_id: radioForm.voice_id,
-                volume: Number(radioForm.volume),
                 radio_beep: Boolean(radioForm.radio_beep),
                 pit_wall_fx: Boolean(radioForm.pit_wall_fx),
             }),
@@ -96,7 +103,7 @@ async function testRadioPreview() {
             activeAudio.pause();
         }
         activeAudio = new Audio(data.url);
-        activeAudio.volume = Math.max(0, Math.min(1, Number(radioForm.volume) / 100));
+        activeAudio.volume = 0.85;
         await activeAudio.play();
     } catch (e) {
         previewError.value = 'No se pudo reproducir la prueba de radio (' + e.message + ').';
@@ -121,6 +128,7 @@ function downloadConfigJson(token) {
     const payload = JSON.stringify({
         api_url: props.apiBaseUrl,
         api_token: token,
+        volume: 85,
         mute: false,
     }, null, 2);
     const blob = new Blob([payload], { type: 'application/json' });
@@ -149,9 +157,9 @@ function revoke(id) {
         <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-6 mb-8">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5 pb-4 border-b border-zinc-800">
                 <div>
-                    <h2 class="text-lg font-semibold text-white">Radio del Ingeniero, Voz Neural y Avisos en Pista</h2>
+                    <h2 class="text-lg font-semibold text-white">Radio del Ingeniero, Modo Carrera &amp; Conversación por Voz (PTT)</h2>
                     <p class="text-xs text-zinc-400">
-                        Elige la voz de tu ingeniero, efectos de muro de boxes, volumen independiente y qué información te canta durante la sesión.
+                        Elige voz neural, autonomía sobre tu <em>Black Box</em> y avisos en pista. <strong class="text-emerald-300">El volumen y el botón Push-To-Talk del volante se configuran directamente haciendo clic derecho en <code class="text-emerald-200">pacefriend-client.exe</code>.</strong>
                     </p>
                 </div>
                 <button
@@ -178,19 +186,12 @@ function revoke(id) {
                     </div>
 
                     <div>
-                        <div class="flex items-center justify-between mb-1">
-                            <label class="text-xs font-medium text-zinc-300">Volumen de Radio</label>
-                            <span class="text-xs font-bold text-emerald-400">{{ radioForm.volume }}%</span>
-                        </div>
-                        <input
-                            v-model.number="radioForm.volume"
-                            type="range"
-                            min="0"
-                            max="100"
-                            step="5"
-                            class="w-full accent-emerald-500 cursor-pointer mt-2"
-                        />
-                        <p class="text-[11px] text-zinc-500 mt-1">Independiente del motor de iRacing.</p>
+                        <label class="block text-xs font-medium text-zinc-300 mb-1">Acción del Ingeniero en Box (Carrera)</label>
+                        <select v-model="radioForm.pit_automation_mode" class="w-full rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+                            <option value="confirm">Recomendar y esperar confirmación (Recomendado)</option>
+                            <option value="auto">Automático (ajusta ruedas/litros/lluvia y avisa)</option>
+                            <option value="manual_voice">Solo cuando yo se lo ordene por voz</option>
+                        </select>
                     </div>
 
                     <div>
@@ -254,6 +255,43 @@ function revoke(id) {
                             <div class="text-zinc-500 mt-0.5">Precaución de goma fría en out-lap y lectura real al parar en boxes.</div>
                         </div>
                     </label>
+                </div>
+
+                <div class="grid md:grid-cols-2 gap-4 pt-2 border-t border-zinc-800/80">
+                    <label class="flex items-start gap-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5 cursor-pointer">
+                        <input v-model="radioForm.crewchief_coexistence" type="checkbox" class="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-emerald-500" />
+                        <div class="text-xs">
+                            <div class="font-semibold text-zinc-200">Modo Convivencia con CrewChief (Carrera)</div>
+                            <div class="text-zinc-500 mt-0.5">Deja el Spotter lateral a CrewChief y evita repetir tiempos rutinarios en carrera, centrándose en estrategia, lluvia/crossover y ritmo limpio.</div>
+                        </div>
+                    </label>
+
+                    <div class="rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5">
+                        <div class="flex items-center justify-between mb-1">
+                            <label class="text-xs font-semibold text-zinc-200">IA Voz Natural PTT — Groq API Gratuita (Whisper + Llama 3.3)</label>
+                            <span :class="radioDefaults.groq_configured ? 'text-emerald-400' : 'text-zinc-500'" class="text-[11px] font-medium">
+                                {{ radioDefaults.groq_configured ? 'Activa (< 0.4s)' : 'Modo Local Activo' }}
+                            </span>
+                        </div>
+                        <input
+                            v-model="radioForm.groq_api_key"
+                            type="password"
+                            autocomplete="off"
+                            :placeholder="radioDefaults.has_user_groq_key ? '•••••••••••• (Clave guardada · escribe para reemplazar)' : 'Opcional: gsk_... (console.groq.com gratis)'"
+                            class="w-full rounded-lg bg-zinc-900 border border-zinc-800 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                        />
+                        <div class="flex items-center justify-between mt-1">
+                            <span class="text-[11px] text-zinc-500">Permite hablarle libremente desde el botón PTT del volante con 0 € de coste.</span>
+                            <button
+                                v-if="radioDefaults.has_user_groq_key"
+                                type="button"
+                                @click="radioForm.clear_groq_key = true; saveRadio()"
+                                class="text-[11px] text-rose-400 hover:underline cursor-pointer"
+                            >
+                                Borrar clave
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <div>
